@@ -29,6 +29,101 @@
 #include <algorithm>
 #include <chrono>
 #include <memory.h>
+#include <cstdio>
+#include <mutex>
+#include <sys/stat.h>
+#include <sys/types.h>
+
+
+// PVR_RTLRADIO_FM_SIDECAR_NOWPLAYING
+namespace
+{
+  std::string pvr_rtlradio_fm_one_line(std::string value)
+  {
+    for (char& c : value)
+    {
+      if (c == '\r' || c == '\n' || c == '\0')
+        c = ' ';
+    }
+
+    while (!value.empty() && value.front() == ' ')
+      value.erase(value.begin());
+
+    while (!value.empty() && value.back() == ' ')
+      value.pop_back();
+
+    return value;
+  }
+
+  void pvr_rtlradio_fm_publish_nowplaying(std::string title,
+                                          std::string artist,
+                                          std::string album,
+                                          std::string station)
+  {
+    static std::mutex lock;
+    static std::string last_state;
+
+    title = pvr_rtlradio_fm_one_line(title);
+    artist = pvr_rtlradio_fm_one_line(artist);
+    album = pvr_rtlradio_fm_one_line(album);
+    station = pvr_rtlradio_fm_one_line(station);
+
+    if (title.empty())
+      title = station.empty() ? "FM Radio" : station;
+
+    if (album.empty())
+      album = "FM Radio";
+
+    std::string state_key = title;
+    state_key += "\n";
+    state_key += artist;
+    state_key += "\n";
+    state_key += album;
+    state_key += "\n";
+    state_key += station;
+
+    std::lock_guard<std::mutex> guard(lock);
+
+    if (state_key == last_state)
+      return;
+
+    last_state = state_key;
+
+    char const* data_dir =
+        "/storage/.kodi/userdata/addon_data/pvr.rtlradio";
+    char const* state_path =
+        "/storage/.kodi/userdata/addon_data/pvr.rtlradio/nowplaying.txt";
+    char const* state_tmp =
+        "/storage/.kodi/userdata/addon_data/pvr.rtlradio/nowplaying.txt.tmp";
+
+    ::mkdir(data_dir, 0755);
+
+    FILE* statefp = std::fopen(state_tmp, "wb");
+    if (statefp)
+    {
+      std::fprintf(statefp, "version=1\n");
+      std::fprintf(statefp, "lot=-1\n");
+      std::fprintf(statefp, "blocked_lot=-1\n");
+      std::fprintf(statefp, "image=\n");
+      std::fprintf(statefp, "artcache_key=\n");
+      std::fprintf(statefp, "station_key=\n");
+      std::fprintf(statefp, "station_name=%s\n", station.c_str());
+      std::fprintf(statefp, "station_slogan=FM Radio\n");
+      std::fprintf(statefp, "title=%s\n", title.c_str());
+      std::fprintf(statefp, "artist=%s\n", artist.c_str());
+      std::fprintf(statefp, "album=%s\n", album.c_str());
+      std::fclose(statefp);
+      std::rename(state_tmp, state_path);
+    }
+
+    kodi::Log(ADDON_LOG_DEBUG,
+              "FM_RDS_SIDECAR nowplaying title='%s' artist='%s' album='%s' station='%s'",
+              title.c_str(),
+              artist.c_str(),
+              album.c_str(),
+              station.c_str());
+  }
+}
 
 #pragma warning(push, 4)
 
@@ -108,6 +203,15 @@ fmstream::fmstream(std::unique_ptr<rtldevice> device,
   m_device->set_automatic_gain_control(channelprops.autogain);
   if (channelprops.autogain == false)
     m_device->set_gain(channelprops.manualgain);
+
+  // FM_RDS_SIDECAR_CLEAR_ON_STREAM_START
+  //
+  // The HD Radio skin overlay reads the shared nowplaying sidecar file.
+  // Clear/replace it for FM immediately so a prior HD station does not remain on screen.
+  {
+    std::string fm_title = channelprops.name.empty() ? m_muxname : channelprops.name;
+    pvr_rtlradio_fm_publish_nowplaying(fm_title, "", "FM Radio", fm_title);
+  }
 
   // Create a worker thread on which to perform the transfer operations
   scalar_condition<bool> started{false};
@@ -282,6 +386,34 @@ DEMUX_PACKET* fmstream::demuxread(std::function<DEMUX_PACKET*(int)> const& alloc
   while (m_demodulator->GetNextRdsGroupData(&rdsgroup))
     m_rdsdecoder.decode_rdsgroup(rdsgroup);
 
+  // FM_RDS_SIDECAR_LIVE_RDS_UPDATE
+  //
+  // Publish live FM RDS/RBDS text to the same sidecar path the skin uses for HD.
+  {
+    std::string station = m_muxname;
+    std::string title;
+    std::string album = "FM Radio";
+
+    if (m_rdsdecoder.has_rbds_callsign())
+      station = m_rdsdecoder.get_rbds_callsign();
+    else if (m_rdsdecoder.has_programservice())
+      station = m_rdsdecoder.get_programservice();
+
+    if (m_rdsdecoder.has_radiotext())
+    {
+      title = m_rdsdecoder.get_radiotext();
+      album = station.empty() ? "FM Radio RDS" : station;
+    }
+    else if (!station.empty() && (station != m_muxname))
+    {
+      title = station;
+      album = "FM Radio RDS";
+    }
+
+    if (!title.empty())
+      pvr_rtlradio_fm_publish_nowplaying(title, "", album, station);
+  }
+
   // Determine the size of the demultiplexer packet data and allocate it
   int packetsize = audiopackets * sizeof(TYPESTEREO16);
   DEMUX_PACKET* packet = allocator(packetsize);
@@ -411,8 +543,14 @@ long long fmstream::length(void) const
 
 std::string fmstream::muxname(void) const
 {
-  // If the callsign for the station is known, use that with an -FM suffix, otherwise use the default
-  return (m_rdsdecoder.has_rbds_callsign()) ? m_rdsdecoder.get_rbds_callsign() : m_muxname;
+  // Prefer a decoded RBDS call sign, then RDS Program Service, then frequency.
+  if (m_rdsdecoder.has_rbds_callsign())
+    return m_rdsdecoder.get_rbds_callsign();
+
+  if (m_rdsdecoder.has_programservice())
+    return m_rdsdecoder.get_programservice();
+
+  return m_muxname;
 }
 
 //---------------------------------------------------------------------------
@@ -484,6 +622,16 @@ long long fmstream::seek(long long /*position*/, int /*whence*/)
 
 std::string fmstream::servicename(void) const
 {
+  // Put live RadioText into Kodi's signal-status ServiceName field.
+  if (m_rdsdecoder.has_radiotext())
+    return m_rdsdecoder.get_radiotext();
+
+  if (m_rdsdecoder.has_programservice())
+    return std::string("RDS/RBDS ") + m_rdsdecoder.get_programservice();
+
+  if (m_rdsdecoder.has_rbds_callsign())
+    return std::string("RDS/RBDS ") + m_rdsdecoder.get_rbds_callsign();
+
   return std::string("Wideband FM radio");
 }
 

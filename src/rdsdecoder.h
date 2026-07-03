@@ -63,6 +63,18 @@ public:
   // Retrieves the RBDS call sign if present
   std::string get_rbds_callsign(void) const;
 
+  // get_programservice
+  //
+  // Retrieves the RDS Program Service name if present
+  std::string get_programservice(void) const;
+
+  // get_radiotext
+  //
+  // Retrieves the RDS RadioText if present
+  std::string get_radiotext(void) const;
+
+
+
   // has_radiotextplus
   //
   // Flag indicating that the RadioText+ (RT+) ODA is present
@@ -72,6 +84,17 @@ public:
   //
   // Flag indicating that the RDBS call sign has been decoded
   bool has_rbds_callsign(void) const;
+
+  // has_programservice
+  //
+  // Flag indicating that the RDS Program Service name has been decoded
+  bool has_programservice(void) const;
+  // has_radiotext
+  //
+  // Flag indicating that RDS RadioText has been decoded
+  bool has_radiotext(void) const;
+
+
 
   // has_rdstmc
   //
@@ -156,6 +179,7 @@ private:
   //
   uint8_t m_ps_ready = 0x00; // PS name ready indicator
   std::array<char, 8> m_ps_data; // Program Service name
+  bool m_ps_valid = false; // Program Service name has been fully decoded
 
   // GROUP 2 - RADIOTEXT
   //
@@ -163,6 +187,7 @@ private:
   uint16_t m_rt_ready = 0x0000; // RadioText ready indicator
   uint8_t m_rt_ab = 0x00; // RadioText A/B flag
   std::array<uint8_t, 64> m_rt_data; // RadioText data
+  bool m_rt_valid = false; // RadioText has been fully decoded
 
   // GROUP 3 - OPEN DATA APPLICATION (ODA) FLAGS
   //

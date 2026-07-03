@@ -34,6 +34,7 @@
 #include <condition_variable>
 #include <map>
 #include <memory>
+#include <string>
 #include <mutex>
 #include <queue>
 #include <thread>
@@ -261,5 +262,27 @@ private:
 //-----------------------------------------------------------------------------
 
 #pragma warning(pop)
+
+
+
+// PVR_RTLRADIO_HD_NOWPLAYING_EPG
+//
+// Temporary bridge used by addon.cpp to expose the currently playing HD Radio
+// ID3 title/artist/album/signal-quality text through Kodi's PVR EPG panel.
+namespace pvr_rtlradio_hd_nowplaying
+{
+  void set_active_channel(int channelUid);
+
+  bool get_for_channel(int channelUid,
+                       std::string& title,
+                       std::string& artist,
+                       std::string& album,
+                       std::string& signal);
+
+  bool get(std::string& title,
+           std::string& artist,
+           std::string& album,
+           std::string& signal);
+}
 
 #endif // __HDSTREAM_H_

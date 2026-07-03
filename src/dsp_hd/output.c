@@ -19,6 +19,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <string.h>
+#include <stdio.h>
 #ifndef _WIN32
 #include <sys/time.h>
 #endif
@@ -33,17 +34,14 @@ void output_push(output_t *st, uint8_t *pkt, unsigned int len, unsigned int prog
     nrsc5_report_hdc(st->radio, program, pkt, len);
 
     if (stream_id != 0)
-        return; // TODO: Process enhanced stream
+        return;
 
 #ifdef USE_FAAD2
     void *buffer;
     NeAACDecFrameInfo info;
 
     if (!st->aacdec[program])
-    {
-        unsigned long samprate = 22050;
-        NeAACDecInitHDC(&st->aacdec[program], &samprate);
-    }
+        NeAACDecInitHDC(&st->aacdec[program]);
 
     buffer = NeAACDecDecode(st->aacdec[program], &info, pkt, len);
     if (info.error > 0)
@@ -53,6 +51,7 @@ void output_push(output_t *st, uint8_t *pkt, unsigned int len, unsigned int prog
         nrsc5_report_audio(st->radio, program, buffer, info.samples);
 #endif
 }
+
 
 static void aas_free_lot(aas_file_t *file)
 {

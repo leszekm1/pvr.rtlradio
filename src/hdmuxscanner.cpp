@@ -169,7 +169,50 @@ void hdmuxscanner::nrsc5_callback(nrsc5_event_t const* event)
     }
   }
 
-  // NRSC5_EVENT_SIG
+  // NRSC5_EVENT_HDC
+	//
+	// HDC packets identify actual HD programs. Some stations may not provide
+	// usable SIG quickly enough during a short scan, so use HDC as a fallback.
+	else if(event->event == NRSC5_EVENT_HDC) {
+
+		uint32_t number = static_cast<uint32_t>(event->hdc.program) + 1;
+
+		char name[256] = {};
+		snprintf(name, std::extent<decltype(name)>::value, "HD%u", number);
+		std::string servicename(name);
+
+		auto found = std::find_if(m_muxdata.subchannels.begin(), m_muxdata.subchannels.end(),
+			[&](auto const& val) -> bool { return val.number == number; });
+
+		if(found == m_muxdata.subchannels.end()) {
+
+			m_muxdata.subchannels.push_back({ number, servicename });
+			m_callback(m_muxdata);
+		}
+	}
+
+	// NRSC5_EVENT_BER
+//
+// Current bit error rate. Lower is better.
+else if(event->event == NRSC5_EVENT_BER)
+{
+  m_muxdata.ber_valid = true;
+  m_muxdata.cber = event->ber.cber;
+  m_callback(m_muxdata);
+}
+
+// NRSC5_EVENT_MER
+//
+// Modulation error ratio. Higher is better; BER remains the primary tuning metric.
+else if(event->event == NRSC5_EVENT_MER)
+{
+  m_muxdata.mer_valid = true;
+  m_muxdata.mer_lower = event->mer.lower;
+  m_muxdata.mer_upper = event->mer.upper;
+  m_callback(m_muxdata);
+}
+
+// NRSC5_EVENT_SIG
   //
   // Station Information Guide (SIG) records have been decoded
   else if (event->event == NRSC5_EVENT_SIG)
@@ -187,10 +230,24 @@ void hdmuxscanner::nrsc5_callback(nrsc5_event_t const* event)
 
         assert(service->number > 0); // Should never happen
 
-        // HD Radio subchannels should always be "HDx"
+        // Prefer a decoded SIG service name when it appears to be useful.
+        // Many stations only provide technical labels like MPS/SPS1/SPS2,
+        // so keep the existing HDx fallback for those cases.
         char name[256] = {};
         snprintf(name, std::extent<decltype(name)>::value, "HD%u", service->number);
-        std::string servicename(name);
+        std::string fallbackname(name);
+
+        std::string servicename = trim((service->name != nullptr) ? service->name : "");
+
+        bool const generic_service_name =
+            servicename.empty() ||
+            servicename == "MPS" ||
+            servicename == "SPS" ||
+            servicename.rfind("SPS", 0) == 0 ||
+            servicename.rfind("HD", 0) == 0;
+
+        if (generic_service_name)
+          servicename = fallbackname;
 
         auto found =
             std::find_if(m_muxdata.subchannels.begin(), m_muxdata.subchannels.end(),

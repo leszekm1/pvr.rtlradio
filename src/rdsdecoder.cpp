@@ -130,6 +130,9 @@ void rdsdecoder::decode_basictuning(tRDS_GROUPS const& rdsgroup)
     // Convert the UECP data frame into a packet and queue it up
     m_uecp_packets.emplace(uecp_create_data_packet(frame));
 
+    // Mark the Program Service name as available for scanners / mux names
+    m_ps_valid = true;
+
     // Reset the segment accumulator back to zero
     m_ps_ready = 0x00;
   }
@@ -370,6 +373,9 @@ void rdsdecoder::decode_radiotext(tRDS_GROUPS const& rdsgroup)
 
     // Convert the UECP data frame into a packet and queue it up
     m_uecp_packets.emplace(uecp_create_data_packet(frame));
+
+    // Mark RadioText as available for Kodi signal-status skin fields
+    m_rt_valid = true;
 
     // Reset the segment accumulator back to zero
     m_rt_ready = 0x0000;
@@ -804,4 +810,88 @@ bool rdsdecoder::pop_uecp_data_packet(uecp_data_packet& packet)
 
 //---------------------------------------------------------------------------
 
+
+//---------------------------------------------------------------------------
+// rdsdecoder::get_radiotext
+//
+// Retrieves the RDS RadioText if present
+//
+// Arguments:
+//
+//	NONE
+
+std::string rdsdecoder::get_radiotext(void) const
+{
+  std::string rt(m_rt_data.begin(), m_rt_data.end());
+
+  std::string::size_type const nul = rt.find('\0');
+  if (nul != std::string::npos)
+    rt.erase(nul);
+
+  std::string::size_type const first = rt.find_first_not_of(' ');
+  if (first == std::string::npos)
+    return "";
+
+  std::string::size_type const last = rt.find_last_not_of(' ');
+  return rt.substr(first, last - first + 1);
+}
+
+//---------------------------------------------------------------------------
+// rdsdecoder::has_radiotext
+//
+// Flag indicating that RDS RadioText has been decoded
+//
+// Arguments:
+//
+//	NONE
+
+bool rdsdecoder::has_radiotext(void) const
+{
+  return m_rt_valid && !get_radiotext().empty();
+}
+
+//---------------------------------------------------------------------------
+
 #pragma warning(pop)
+
+
+//---------------------------------------------------------------------------
+// rdsdecoder::get_programservice
+//
+// Retrieves the RDS Program Service name if present
+//
+// Arguments:
+//
+//	NONE
+
+std::string rdsdecoder::get_programservice(void) const
+{
+  std::string ps(m_ps_data.begin(), m_ps_data.end());
+
+  std::string::size_type const nul = ps.find('\0');
+  if (nul != std::string::npos)
+    ps.erase(nul);
+
+  std::string::size_type const first = ps.find_first_not_of(' ');
+  if (first == std::string::npos)
+    return "";
+
+  std::string::size_type const last = ps.find_last_not_of(' ');
+  return ps.substr(first, last - first + 1);
+}
+
+//---------------------------------------------------------------------------
+// rdsdecoder::has_programservice
+//
+// Flag indicating that the RDS Program Service name has been decoded
+//
+// Arguments:
+//
+//	NONE
+
+bool rdsdecoder::has_programservice(void) const
+{
+  return m_ps_valid && !get_programservice().empty();
+}
+
+//---------------------------------------------------------------------------

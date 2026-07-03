@@ -139,7 +139,9 @@ void id3v2tag::add_text_frame(id3v2_frameid_t frameid, char const* text, bool ap
     return;
   size_t textlength = strlen(text);
 
-  // encoding | text | terminator
+  // encoding | text
+  // Do not add a trailing NUL to simple text frames.
+  // Kodi's TPE1 path uses TagLib fieldList(), and in ID3v2.4 NUL can be treated as a value separator.
   frame_t frame = {};
   memcpy(frame.id, frameid, sizeof(id3v2_frameid_t));
   frame.size = 1 + textlength + 1;
@@ -148,9 +150,9 @@ void id3v2tag::add_text_frame(id3v2_frameid_t frameid, char const* text, bool ap
   frame.data[0] = 0x00; // ISO-8859-1
   if (textlength > 0)
     memcpy(&frame.data[1], text, textlength); // Text
-  frame.data[textlength + 1] = 0x00; // NULL terminator
 
-  m_frames.emplace_back(std::move(frame));
+  frame.data[textlength + 1] = 0x00; // NULL terminator
+m_frames.emplace_back(std::move(frame));
 }
 
 //---------------------------------------------------------------------------

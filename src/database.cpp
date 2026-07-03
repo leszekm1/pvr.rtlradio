@@ -27,6 +27,9 @@
 #include "utils/value_size_defines.h"
 
 #include <stdexcept>
+#include <rapidjson/prettywriter.h>
+#include <rapidjson/stringbuffer.h>
+#include <cstdint>
 
 #pragma warning(push, 4)
 
@@ -159,6 +162,35 @@ void connectionpool::release(sqlite3* handle)
   m_queue.push(handle);
 }
 
+
+//---------------------------------------------------------------------------
+// channel_name_for_storage
+//
+// Returns the parent channel name to store in the database.
+//
+// For HD Radio, store the parent multiplex name as the frequency label
+// instead of the SIS call sign. The call sign/branding belongs in the
+// subchannel name, which avoids visible names like "KNKX KNKX HD1" and
+// matches the import/export JSON style:
+//   parent name: "88.5"
+//   subchannel:  "KNKX Public Radio"
+//
+// For all other modulation types, preserve the caller-supplied name.
+
+static std::string channel_name_for_storage(struct channelprops const& channelprops)
+{
+  if (channelprops.modulation == modulation::hd)
+  {
+    char name[32] = {};
+    snprintf(name, sizeof(name), "%u.%u",
+             channelprops.frequency / 1000000,
+             (channelprops.frequency % 1000000) / 100000);
+    return std::string(name);
+  }
+
+  return channelprops.name;
+}
+
 //---------------------------------------------------------------------------
 // add_channel
 //
@@ -171,10 +203,12 @@ void connectionpool::release(sqlite3* handle)
 
 bool add_channel(sqlite3* instance, struct channelprops const& channelprops)
 {
+  std::string const channelname = channel_name_for_storage(channelprops);
+
   // frequency | modulation | name | autogain | manualgain | freqcorrection | logourl
   return execute_non_query(instance, "replace into channel values(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                            channelprops.frequency, static_cast<int>(channelprops.modulation),
-                           channelprops.name.c_str(), (channelprops.autogain) ? 1 : 0,
+                           channelname.c_str(), (channelprops.autogain) ? 1 : 0,
                            channelprops.manualgain, channelprops.freqcorrection,
                            channelprops.logourl.c_str()) > 0;
 }
@@ -220,11 +254,13 @@ bool add_channel(sqlite3* instance,
     try
     {
 
+      std::string const channelname = channel_name_for_storage(channelprops);
+
       // frequency | modulation | name | autogain | manualgain | freqcorrection | logourl
       result =
           execute_non_query(instance, "replace into channel values(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                             channelprops.frequency, static_cast<int>(channelprops.modulation),
-                            channelprops.name.c_str(), (channelprops.autogain) ? 1 : 0,
+                            channelname.c_str(), (channelprops.autogain) ? 1 : 0,
                             channelprops.manualgain, channelprops.freqcorrection,
                             channelprops.logourl.c_str()) > 0;
 
@@ -1074,16 +1110,147 @@ static std::string execute_scalar_string(sqlite3* instance,
 
 std::string export_channels(sqlite3* instance)
 {
-  if (instance == nullptr)
-    throw std::invalid_argument("instance");
+  rapidjson::StringBuffer buffer;
+  rapidjson::PrettyWriter<rapidjson::StringBuffer> writer(buffer);
 
-  return execute_scalar_string(
-      instance, "select json_group_array(json_object("
-                "'frequency', frequency, 'modulation', case modulation when 0 then 'FM' when 1 "
-                "then 'HD' when 2 then 'DAB' when 3 then 'WX' else 'FM' end, "
-                "'name', name, 'autogain', autogain, 'manualgain', manualgain, 'freqcorrection', "
-                "freqcorrection, 'logourl', logourl)) "
-                "from channel");
+  auto column_text = [](sqlite3_stmt* statement, int column) -> char const*
+  {
+    unsigned char const* value = sqlite3_column_text(statement, column);
+    return (value != nullptr) ? reinterpret_cast<char const*>(value) : "";
+  };
+
+  auto modulation_name = [](int value) -> char const*
+  {
+    switch (static_cast<enum modulation>(value))
+    {
+      case modulation::fm:
+        return "FM";
+      case modulation::wx:
+        return "WX";
+      case modulation::dab:
+        return "DAB";
+      case modulation::hd:
+        return "HD";
+      default:
+        return "";
+    }
+  };
+
+  writer.StartArray();
+
+  sqlite3_stmt* channel_statement = nullptr;
+  char const* channel_sql =
+      "select frequency, modulation, name, autogain, manualgain, freqcorrection, logourl "
+      "from channel "
+      "order by modulation, frequency";
+
+  if (sqlite3_prepare_v2(instance, channel_sql, -1, &channel_statement, nullptr) == SQLITE_OK)
+  {
+    while (sqlite3_step(channel_statement) == SQLITE_ROW)
+    {
+      uint32_t const frequency =
+          static_cast<uint32_t>(sqlite3_column_int64(channel_statement, 0));
+      int const modulation_value = sqlite3_column_int(channel_statement, 1);
+
+      writer.StartObject();
+
+      writer.Key("frequency");
+      writer.Uint64(frequency);
+
+      writer.Key("modulation");
+      writer.String(modulation_name(modulation_value));
+
+      writer.Key("name");
+      writer.String(column_text(channel_statement, 2));
+
+      writer.Key("autogain");
+      writer.Int(sqlite3_column_int(channel_statement, 3));
+
+      writer.Key("manualgain");
+      writer.Int(sqlite3_column_int(channel_statement, 4));
+
+      writer.Key("freqcorrection");
+      writer.Int(sqlite3_column_int(channel_statement, 5));
+
+      writer.Key("logourl");
+      writer.String(column_text(channel_statement, 6));
+
+      sqlite3_stmt* subchannel_statement = nullptr;
+      char const* subchannel_sql =
+          "select number, name, logourl "
+          "from subchannel "
+          "where frequency = ?1 and modulation = ?2 "
+          "order by number";
+
+      if (sqlite3_prepare_v2(instance, subchannel_sql, -1, &subchannel_statement, nullptr) ==
+          SQLITE_OK)
+      {
+        sqlite3_bind_int64(subchannel_statement, 1, frequency);
+        sqlite3_bind_int(subchannel_statement, 2, modulation_value);
+
+        bool wrote_subchannels = false;
+
+        while (sqlite3_step(subchannel_statement) == SQLITE_ROW)
+        {
+          if (!wrote_subchannels)
+          {
+            writer.Key("subchannels");
+            writer.StartArray();
+            wrote_subchannels = true;
+          }
+
+          writer.StartObject();
+
+          int const stored_subchannel = sqlite3_column_int(subchannel_statement, 0);
+          int json_subchannel = stored_subchannel;
+
+          // HD Radio is stored internally as one-based:
+          //   DB 1 = HD1, DB 2 = HD2, DB 3 = HD3
+          //
+          // The import/export JSON schema is zero-based:
+          //   JSON 0 = HD1, JSON 1 = HD2, JSON 2 = HD3
+          //
+          // Keep the internal database/playback numbering unchanged and only
+          // convert at the JSON export boundary.
+          if (static_cast<enum modulation>(modulation_value) == modulation::hd &&
+              json_subchannel > 0)
+          {
+            json_subchannel -= 1;
+          }
+
+          writer.Key("subchannel");
+          writer.Uint(static_cast<unsigned int>(json_subchannel));
+
+          writer.Key("name");
+          writer.String(column_text(subchannel_statement, 1));
+
+          char const* subchannel_logourl = column_text(subchannel_statement, 2);
+          if (subchannel_logourl[0] != '\0')
+          {
+            writer.Key("logourl");
+            writer.String(subchannel_logourl);
+          }
+
+          writer.EndObject();
+        }
+
+        if (wrote_subchannels)
+          writer.EndArray();
+      }
+
+      if (subchannel_statement != nullptr)
+        sqlite3_finalize(subchannel_statement);
+
+      writer.EndObject();
+    }
+  }
+
+  if (channel_statement != nullptr)
+    sqlite3_finalize(channel_statement);
+
+  writer.EndArray();
+
+  return std::string(buffer.GetString(), buffer.GetSize());
 }
 
 //---------------------------------------------------------------------------
@@ -1292,72 +1459,222 @@ bool has_rawfiles(sqlite3* instance)
 
 void import_channels(sqlite3* instance, char const* json)
 {
-  if (instance == nullptr)
-    throw std::invalid_argument("instance");
-  if ((json == nullptr) || (*json == '\0'))
-    throw std::invalid_argument("instance");
+    if(instance == nullptr) throw std::invalid_argument("instance");
+    if((json == nullptr) || (*json == '\0')) throw std::invalid_argument("json");
 
-  //
-  // TODO: Add a 'channel' element that can replace frequency/modulation for named channels.
-  // The JSON will likely need to be put into a temp table anyway to deal with subchannels
-  // so this entire operation will likely need to be redone regardless
-  //
+    // Extended JSON import:
+    //
+    // Supports both old flat HD subchannel rows:
+    //
+    //   { "frequency": 97300000, "modulation": "HD", "subchannel": 0, "name": "HD1" }
+    //
+    // and new nested HD subchannel rows:
+    //
+    //   {
+    //     "frequency": 97300000,
+    //     "modulation": "HD",
+    //     "name": "KIRO-FM HD",
+    //     "autogain": 1,
+    //     "freqcorrection": 0,
+    //     "subchannels": [
+    //       { "subchannel": 0, "name": "KIRO Newsradio" },
+    //       { "subchannel": 1, "name": "Seattle Sports" }
+    //     ]
+    //   }
+    //
+    // JSON subchannel numbers are zero-based:
+    //   0 -> HD1 / nrsc5 program 0
+    //   1 -> HD2 / nrsc5 program 1
+    //   2 -> HD3 / nrsc5 program 2
+    //
+    // The database stores HD subchannel numbers as one-based.
 
-  // Massage the input as much as possible, only the frequency is actually required,
-  // the rest can be defaulted if not present. Also watch out for duplicates and the frequency range
-  execute_non_query(
-      instance,
-      "replace into channel "
-      "select cast(json_extract(entry.value, '$.frequency') as integer) as frequency, "
-      "case upper(cast(ifnull(json_extract(entry.value, '$.modulation'), '') as text)) "
-      "  when 'FM' then 0 "
-      "  when 'FMRADIO' then 0 "
-      "  when 'HD' then 1 "
-      "  when 'HDRADIO' then 1 "
-      "  when 'DAB' then 2 "
-      "  when 'DAB+' then 2 "
-      "  when 'WX' then 3 "
-      "  when 'WEATHER' then 3 "
-      "  else case "
-      "    when cast(json_extract(entry.value, '$.frequency') as integer) between 174928000 and "
-      "239200000 then 2 " // DAB
-      "    when cast(json_extract(entry.value, '$.frequency') as integer) between 162400000 and "
-      "162550000 then 3 " // WX
-      "    else 0 end " // FM
-      "  end as modulation, "
-      "cast(ifnull(json_extract(entry.value, '$.name'), '') as text) as name, "
-      "cast(ifnull(json_extract(entry.value, '$.autogain'), 0) as integer) as autogain, "
-      "cast(ifnull(json_extract(entry.value, '$.manualgain'), 0) as integer) as manualgain, "
-      "cast(ifnull(json_extract(entry.value, '$.freqcorrection'), 0) as integer) as "
-      "freqcorrection, "
-      "json_extract(entry.value, '$.logourl') as logourl " // <-- this one allows nulls
-      "from json_each(?1) as entry "
-      "where frequency is not null and "
-      "  ((frequency between 87500000 and 108000000) or " // FM / HD
-      "  (frequency between 174928000 and 239200000) or " // DAB
-      "  (frequency between 162400000 and 162550000)) " // WX
-      "  and modulation between 0 and 3 "
-      "group by frequency, modulation",
-      json);
+    execute_non_query(instance, "drop table if exists channel_import");
+    execute_non_query(instance, "drop table if exists subchannel_import");
 
-  // Remove any FM channels that are outside the frequency range
-  execute_non_query(instance, "delete from channel where modulation = 0 and "
-                              "frequency not between 87500000 and 108000000");
+    execute_non_query(instance, R"SQL(
+        create temp table channel_import as
+        select
+            cast(json_extract(value, '$.frequency') as integer) as frequency,
 
-  // Remove any HD Radio channels that are outside the frequency range
-  execute_non_query(
-      instance, "delete from channel where modulation = 0 and "
-                "(frequency not between 87900000 and 107900000 or (frequency / 100000) % 2 = 0)");
+            case upper(coalesce(json_extract(value, '$.modulation'), 'FM'))
+                when 'HD' then 1
+                when 'HDRADIO' then 1
+                when 'DAB' then 2
+                when 'DABRADIO' then 2
+                when 'WX' then 3
+                when 'WEATHER' then 3
+                when 'WEATHERRADIO' then 3
+                else 0
+            end as modulation,
 
-  // Remove any DAB channels that don't match an entry in namedchannel
-  execute_non_query(instance,
-                    "delete from channel where modulation = 2 and "
-                    "frequency not in(select frequency from namedchannel where modulation = 2)");
+            case
+                when json_type(value, '$.subchannel') is null then 0
+                else 1
+            end as has_flat_subchannel,
 
-  // Remove any Weather Radio channels that don't match an entry in namedchannel
-  execute_non_query(instance,
-                    "delete from channel where modulation = 3 and "
-                    "frequency not in(select frequency from namedchannel where modulation = 3)");
+            coalesce(json_extract(value, '$.name'), '') as name,
+            coalesce(cast(json_extract(value, '$.autogain') as integer), 0) as autogain,
+            coalesce(cast(json_extract(value, '$.manualgain') as integer), 0) as manualgain,
+            coalesce(cast(json_extract(value, '$.freqcorrection') as integer), 0) as freqcorrection,
+            coalesce(json_extract(value, '$.logourl'), '') as logourl
+
+        from json_each(?1)
+        where json_type(value, '$.frequency') is not null
+    )SQL", json);
+
+    // Subchannel import table. This accepts:
+    //
+    // 1. Old flat form:
+    //      { frequency, modulation:"HD", subchannel:0, name:"HD1" }
+    //
+    // 2. New nested form:
+    //      { frequency, modulation:"HD", subchannels:[{subchannel:0,name:"HD1"}] }
+    //
+    // For nested entries, if "subchannel" is omitted, the array index is used.
+    // If "number" is provided instead, it is treated as one-based HD number.
+    execute_non_query(instance, R"SQL(
+        create temp table subchannel_import as
+
+        select
+            cast(json_extract(parent.value, '$.frequency') as integer) as frequency,
+
+            case upper(coalesce(json_extract(parent.value, '$.modulation'), 'FM'))
+                when 'HD' then 1
+                when 'HDRADIO' then 1
+                when 'DAB' then 2
+                when 'DABRADIO' then 2
+                when 'WX' then 3
+                when 'WEATHER' then 3
+                when 'WEATHERRADIO' then 3
+                else 0
+            end as modulation,
+
+            coalesce(
+                cast(json_extract(child.value, '$.subchannel') as integer),
+                cast(json_extract(child.value, '$.number') as integer) - 1,
+                cast(child.key as integer)
+            ) as subchannel,
+
+            coalesce(json_extract(child.value, '$.name'), '') as name,
+            coalesce(json_extract(child.value, '$.logourl'), '') as logourl
+
+        from json_each(?1) parent
+        join json_each(parent.value, '$.subchannels') child
+        where json_type(parent.value, '$.frequency') is not null
+          and json_type(parent.value, '$.subchannels') = 'array'
+
+        union all
+
+        select
+            cast(json_extract(value, '$.frequency') as integer) as frequency,
+
+            case upper(coalesce(json_extract(value, '$.modulation'), 'FM'))
+                when 'HD' then 1
+                when 'HDRADIO' then 1
+                when 'DAB' then 2
+                when 'DABRADIO' then 2
+                when 'WX' then 3
+                when 'WEATHER' then 3
+                when 'WEATHERRADIO' then 3
+                else 0
+            end as modulation,
+
+            cast(json_extract(value, '$.subchannel') as integer) as subchannel,
+            coalesce(json_extract(value, '$.name'), '') as name,
+            coalesce(json_extract(value, '$.logourl'), '') as logourl
+
+        from json_each(?1)
+        where json_type(value, '$.frequency') is not null
+          and json_type(value, '$.subchannel') is not null
+    )SQL", json);
+
+    execute_non_query(instance, "begin immediate transaction");
+
+    try
+    {
+        // Insert/replace one parent tuning channel per frequency/modulation.
+        // Prefer rows that are not old-style flat subchannel rows.
+        execute_non_query(instance, R"SQL(
+            replace into channel(frequency, modulation, name, autogain, manualgain, freqcorrection, logourl)
+            select
+                c.frequency,
+                c.modulation,
+                c.name,
+                c.autogain,
+                c.manualgain,
+                c.freqcorrection,
+                c.logourl
+            from channel_import c
+            inner join
+            (
+                select
+                    frequency,
+                    modulation,
+                    coalesce(
+                        min(case when has_flat_subchannel = 0 then rowid end),
+                        min(rowid)
+                    ) as picked_rowid
+                from channel_import
+                group by frequency, modulation
+            ) picked
+            on c.rowid = picked.picked_rowid
+        )SQL");
+
+        // If this JSON contains HD subchannels for a frequency, replace that
+        // frequency's existing HD subchannel set with the imported set.
+        execute_non_query(instance, R"SQL(
+            delete from subchannel
+            where modulation = 1
+              and exists
+              (
+                  select 1
+                  from subchannel_import i
+                  where i.frequency = subchannel.frequency
+                    and i.modulation = subchannel.modulation
+                    and i.modulation = 1
+              )
+              and number not in
+              (
+                  select i.subchannel + 1
+                  from subchannel_import i
+                  where i.frequency = subchannel.frequency
+                    and i.modulation = subchannel.modulation
+                    and i.modulation = 1
+                    and i.subchannel >= 0
+              )
+        )SQL");
+
+        // Insert/update HD subchannels.
+        execute_non_query(instance, R"SQL(
+            insert into subchannel(frequency, number, modulation, name, logourl)
+            select
+                frequency,
+                subchannel + 1,
+                modulation,
+                name,
+                logourl
+            from subchannel_import
+            where modulation = 1
+              and subchannel >= 0
+            on conflict(frequency, modulation, number)
+            do update set
+                name = excluded.name,
+                logourl = excluded.logourl
+        )SQL");
+
+        execute_non_query(instance, "commit transaction");
+    }
+    catch(...)
+    {
+        try_execute_non_query(instance, "rollback transaction");
+        execute_non_query(instance, "drop table if exists subchannel_import");
+        execute_non_query(instance, "drop table if exists channel_import");
+        throw;
+    }
+
+    execute_non_query(instance, "drop table if exists subchannel_import");
+    execute_non_query(instance, "drop table if exists channel_import");
 }
 
 //---------------------------------------------------------------------------
@@ -1660,11 +1977,13 @@ bool update_channel(sqlite3* instance, struct channelprops const& channelprops)
   if (instance == nullptr)
     throw std::invalid_argument("instance");
 
+  std::string const channelname = channel_name_for_storage(channelprops);
+
   return execute_non_query(instance,
                            "update channel set name = ?1, autogain = ?2, manualgain = ?3, "
                            "freqcorrection = ?4, logourl = ?5 "
                            "where frequency = ?6 and modulation = ?7",
-                           channelprops.name.c_str(), (channelprops.autogain) ? 1 : 0,
+                           channelname.c_str(), (channelprops.autogain) ? 1 : 0,
                            channelprops.manualgain, channelprops.freqcorrection,
                            channelprops.logourl.c_str(), channelprops.frequency,
                            static_cast<int>(channelprops.modulation)) > 0;
@@ -1711,12 +2030,14 @@ bool update_channel(sqlite3* instance,
     try
     {
 
+      std::string const channelname = channel_name_for_storage(channelprops);
+
       // Update the base channel properties
       result = execute_non_query(instance,
                                  "update channel set name = ?1, autogain = ?2, manualgain = ?3, "
                                  "freqcorrection = ?4, logourl = ?5 "
                                  "where frequency = ?6 and modulation = ?7",
-                                 channelprops.name.c_str(), (channelprops.autogain) ? 1 : 0,
+                                 channelname.c_str(), (channelprops.autogain) ? 1 : 0,
                                  channelprops.manualgain, channelprops.freqcorrection,
                                  channelprops.logourl.c_str(), channelprops.frequency,
                                  static_cast<int>(channelprops.modulation)) > 0;

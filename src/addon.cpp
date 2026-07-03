@@ -1,3 +1,12 @@
+#include <mutex>
+#include <limits>
+#include <functional>
+#include <cmath>
+#include <cstdint>
+#include <atomic>
+#include <cstdio>
+#include <ctime>
+#include <chrono>
 //---------------------------------------------------------------------------
 // Copyright (c) 2020-2022 Michael G. Brehm
 //
@@ -26,6 +35,7 @@
 #include "filedevice.h"
 #include "fmstream.h"
 #include "hdstream.h"
+#include "hdmuxscanner.h"
 #include "tcpdevice.h"
 #ifdef USB_DEVICE_SUPPORT
 #include "usbdevice.h"
@@ -35,6 +45,7 @@
 #include "exception_control/string_exception.h"
 #include "gui/channeladd.h"
 #include "gui/channelsettings.h"
+#include "signalmeter.h"
 #include "utils/value_size_defines.h"
 
 #include <assert.h>
@@ -42,12 +53,19 @@
 #include <kodi/General.h>
 #include <kodi/gui/dialogs/FileBrowser.h>
 #include <kodi/gui/dialogs/OK.h>
+#include <kodi/gui/dialogs/Progress.h>
+#include <kodi/gui/dialogs/ExtendedProgress.h>
 #include <kodi/gui/dialogs/Select.h>
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
 #include <rapidjson/prettywriter.h>
 #include <utility>
 #include <vector>
+#include <thread>
+#include <algorithm>
+#include <cstdlib>
+#include <exception>
+#include <memory>
 
 #ifdef WIN32
 #include <windows.h>
@@ -2069,7 +2087,8 @@ PVR_ERROR addon::GetCapabilities(kodi::addon::PVRCapabilities& capabilities)
   capabilities.SetSupportsRadio(true);
   capabilities.SetSupportsChannelGroups(true);
   capabilities.SetSupportsChannelSettings(true);
-  capabilities.SetHandlesInputStream(true);
+    capabilities.SetSupportsChannelScan(true);
+capabilities.SetHandlesInputStream(true);
   capabilities.SetHandlesDemuxing(true);
   capabilities.SetSupportsEPG(true);
 
@@ -2639,7 +2658,1629 @@ PVR_ERROR addon::OpenDialogChannelAdd(kodi::addon::PVRChannel const& /*channel*/
 
 PVR_ERROR addon::OpenDialogChannelScan(void)
 {
-  return PVR_ERROR::PVR_ERROR_NOT_IMPLEMENTED;
+  static std::atomic_bool scan_running{false};
+
+  bool expected = false;
+  if (!scan_running.compare_exchange_strong(expected, true))
+  {
+    kodi::gui::dialogs::OK::ShowAndGetInput(
+        "Radio channel scan",
+        "A radio channel scan is already running.");
+    return PVR_ERROR::PVR_ERROR_NO_ERROR;
+  }
+
+  std::thread([this]() -> void
+  {
+    struct scan_guard
+    {
+      std::atomic_bool& running;
+      ~scan_guard() { running.store(false); }
+    } guard{scan_running};
+
+    std::unique_lock lock(m_pvrstream_lock);
+
+    if (m_pvrstream)
+    {
+      kodi::gui::dialogs::OK::ShowAndGetInput(
+          kodi::addon::GetLocalizedString(30405),
+          "Automatic radio channel scan requires exclusive access to the RTL-SDR tuner.",
+          "",
+          "Stop active playback before starting the scan.");
+      return;
+    }
+
+    struct settings settings = copy_settings();
+
+    enum scan_mode_type
+    {
+      scan_mode_hd_full,
+      scan_mode_hd_single,
+      scan_mode_fm_rds,
+      scan_mode_fm_rds_single,
+      scan_mode_wx
+    };
+
+    std::vector<std::string> scan_types;
+    std::vector<scan_mode_type> scan_modes;
+
+    if (settings.hdradio_enable)
+    {
+      scan_types.emplace_back("HD Radio full scan");
+      scan_modes.emplace_back(scan_mode_hd_full);
+
+      scan_types.emplace_back("HD Radio single-frequency scan");
+      scan_modes.emplace_back(scan_mode_hd_single);
+    }
+
+    if (settings.fmradio_enable_rds)
+    {
+      scan_types.emplace_back("FM Radio RDS scan");
+      scan_modes.emplace_back(scan_mode_fm_rds);
+
+      scan_types.emplace_back("FM Radio RDS single-frequency scan");
+      scan_modes.emplace_back(scan_mode_fm_rds_single);
+    }
+
+    if (settings.wxradio_enable)
+    {
+      scan_types.emplace_back("Weather Radio scan");
+      scan_modes.emplace_back(scan_mode_wx);
+    }
+
+    if (scan_modes.empty())
+    {
+      kodi::gui::dialogs::OK::ShowAndGetInput(
+          "Radio channel scan",
+          "No scannable radio types are enabled in the add-on settings.");
+      return;
+    }
+
+    scan_mode_type scan_mode = scan_modes[0];
+
+    if (scan_modes.size() > 1)
+    {
+      int selected = kodi::gui::dialogs::Select::Show("Select scan type", scan_types);
+      if (selected < 0)
+        return;
+
+      scan_mode = scan_modes[selected];
+    }
+
+    enum modulation scan_modulation =
+        (scan_mode == scan_mode_wx) ? modulation::wx : modulation::hd;
+
+    bool single_frequency_hd_scan = false;
+    uint32_t selected_single_hd_frequency = 0;
+
+    bool single_frequency_fm_rds_scan = false;
+    uint32_t selected_single_fm_rds_frequency = 0;
+
+    if (scan_mode == scan_mode_hd_single)
+    {
+      std::vector<std::string> hd_frequency_labels;
+      std::vector<uint32_t> hd_frequencies;
+
+      for (uint32_t frequency = 87900000; frequency <= 107900000; frequency += 200000)
+      {
+        char label[64] = {};
+        snprintf(label, std::extent<decltype(label)>::value, "%u.%u MHz",
+                 frequency / 1000000,
+                 (frequency % 1000000) / 100000);
+
+        hd_frequency_labels.emplace_back(label);
+        hd_frequencies.emplace_back(frequency);
+      }
+
+      int selected_frequency =
+          kodi::gui::dialogs::Select::Show("Select HD Radio frequency", hd_frequency_labels);
+      if (selected_frequency < 0)
+        return;
+
+      single_frequency_hd_scan = true;
+      selected_single_hd_frequency = hd_frequencies[selected_frequency];
+    }
+
+    if (scan_mode == scan_mode_fm_rds_single)
+    {
+      std::vector<std::string> fm_frequency_labels;
+      std::vector<uint32_t> fm_frequencies;
+
+      bool const is_north_america = is_region_northamerica(settings);
+      uint32_t const first_frequency = is_north_america ? 87900000 : 87500000;
+      uint32_t const last_frequency = 107900000;
+      uint32_t const step_frequency = is_north_america ? 200000 : 100000;
+
+      for (uint32_t frequency = first_frequency;
+           frequency <= last_frequency;
+           frequency += step_frequency)
+      {
+        char label[64] = {};
+        snprintf(label, std::extent<decltype(label)>::value, "%u.%u MHz",
+                 frequency / 1000000,
+                 (frequency % 1000000) / 100000);
+
+        fm_frequency_labels.emplace_back(label);
+        fm_frequencies.emplace_back(frequency);
+      }
+
+      int selected_frequency =
+          kodi::gui::dialogs::Select::Show("Select FM Radio RDS frequency",
+                                           fm_frequency_labels);
+      if (selected_frequency < 0)
+        return;
+
+      single_frequency_fm_rds_scan = true;
+      selected_single_fm_rds_frequency = fm_frequencies[selected_frequency];
+    }
+
+    // FM_RDS_SCAN_BRANCH_BEGIN
+    if ((scan_mode == scan_mode_fm_rds) || (scan_mode == scan_mode_fm_rds_single))
+    {
+      if (!settings.fmradio_enable_rds)
+      {
+        kodi::gui::dialogs::OK::ShowAndGetInput(
+            "FM Radio RDS scan",
+            "FM Radio RDS/RBDS decoding is disabled in the add-on settings.");
+        return;
+      }
+
+      struct fm_rds_scan_result
+      {
+        bool found = false;
+        uint64_t bytes = 0;
+        int gain = 0;
+        int quality = 0;
+        int snr = 0;
+        std::string name;
+        std::string callsign;
+        std::string ps;
+        std::string radiotext;
+        int score = -1000000000;
+      };
+
+      auto const is_north_america = is_region_northamerica(settings);
+
+      uint32_t const band_first_frequency = is_north_america ? 87900000 : 87500000;
+      uint32_t const band_last_frequency = 107900000;
+      uint32_t const step_frequency = is_north_america ? 200000 : 100000;
+
+      uint32_t const first_frequency =
+          single_frequency_fm_rds_scan ? selected_single_fm_rds_frequency : band_first_frequency;
+      uint32_t const last_frequency =
+          single_frequency_fm_rds_scan ? selected_single_fm_rds_frequency : band_last_frequency;
+      uint32_t const total_frequencies =
+          single_frequency_fm_rds_scan
+              ? 1
+              : (((band_last_frequency - band_first_frequency) / step_frequency) + 1);
+
+      uint32_t const fm_sample_rate = static_cast<uint32_t>(settings.fmradio_sample_rate);
+      if ((fm_sample_rate < 900001) || (fm_sample_rate > 3200000))
+        throw string_exception(
+            "FM Radio RDS scan requires FM sample rate between 900001Hz and 3200000Hz");
+
+      auto const scan_time = std::chrono::seconds(6);
+      auto const minimum_signal_time = std::chrono::milliseconds(1500);
+      auto const minimum_name_time = std::chrono::milliseconds(2500);
+
+      int channels_found = 0;
+      bool canceled = false;
+
+      auto format_frequency = [](uint32_t frequency) -> std::string
+      {
+        char buffer[32] = {};
+        snprintf(buffer, sizeof(buffer), "%.1f MHz",
+                 static_cast<double>(frequency) / 1000000.0);
+        return std::string(buffer);
+      };
+
+      kodi::gui::dialogs::CProgress progress;
+      progress.SetHeading("FM Radio RDS scan");
+      progress.SetCanCancel(true);
+      progress.ShowProgressBar(true);
+      progress.SetPercentage(0);
+      progress.SetLine(0, "Preparing RTL-SDR tuner.");
+      progress.SetLine(1, is_north_america ? "RBDS mode" : "RDS mode");
+      progress.SetLine(2, "Press Cancel to stop");
+      progress.Open();
+
+      auto update_progress =
+          [&](int percent,
+              std::string const& line0,
+              std::string const& line1,
+              std::string const& line2) -> bool
+      {
+        if (percent < 0)
+          percent = 0;
+        if (percent > 100)
+          percent = 100;
+
+        progress.SetPercentage(percent);
+        progress.SetLine(0, line0);
+        progress.SetLine(1, line1);
+        progress.SetLine(2, line2);
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        return progress.IsCanceled();
+      };
+
+      std::vector<int> valid_gains;
+      {
+        std::unique_ptr<rtldevice> gain_device = create_device(settings);
+        gain_device->get_valid_gains(valid_gains);
+      }
+
+      if (valid_gains.empty())
+      {
+        // Fallback R820T/R820T2-style values, in tenths of dB.
+        valid_gains = {
+            0, 9, 14, 27, 37, 77, 87, 125, 144, 157,
+            166, 197, 207, 229, 254, 280, 297, 328,
+            338, 364, 372, 386, 402, 421, 434, 439,
+            445, 480, 496};
+      }
+
+      std::sort(valid_gains.begin(), valid_gains.end());
+      valid_gains.erase(std::unique(valid_gains.begin(), valid_gains.end()), valid_gains.end());
+
+      auto nearest_valid_gain = [&](int target) -> int
+      {
+        int best = valid_gains.front();
+        int best_distance = std::abs(best - target);
+
+        for (int gain : valid_gains)
+        {
+          int distance = std::abs(gain - target);
+          if (distance < best_distance)
+          {
+            best = gain;
+            best_distance = distance;
+          }
+        }
+
+        return best;
+      };
+
+      std::vector<int> scan_gains;
+
+      // Representative RTL-SDR manual gains, in tenths of dB.
+      // Try a wider range and choose the best result instead of accepting
+      // the first gain that happens to decode RDS/RBDS.
+      for (int desired : {27, 87, 125, 197, 280, 328, 386, 439})
+      {
+        int gain = nearest_valid_gain(desired);
+        if (std::find(scan_gains.begin(), scan_gains.end(), gain) == scan_gains.end())
+          scan_gains.emplace_back(gain);
+      }
+
+      auto score_fm_rds_scan_result =
+          [](fm_rds_scan_result const& result) -> int
+      {
+        if (!result.found || result.name.empty())
+          return -1000000000 + (result.quality * 10) + (result.snr * 10);
+
+        int score = 0;
+
+        // Prefer stable station identity first.
+        if (!result.callsign.empty())
+          score += 100000;
+        else if (!result.ps.empty())
+          score += 80000;
+        else
+          score += 50000;
+
+        // RadioText is useful confirmation, but not as stable as PS/call sign.
+        if (!result.radiotext.empty())
+          score += 10000;
+
+        score += result.quality * 100;
+        score += result.snr * 100;
+
+        // Small tie-breaker: prefer the lower gain when quality/SNR are equal.
+        score -= result.gain / 10;
+
+        // No bytes means something went wrong.
+        if (result.bytes == 0)
+          score -= 10000;
+
+        return score;
+      };
+
+      auto scan_one_fm =
+          [&](uint32_t frequency, int gain, int percent) -> fm_rds_scan_result
+      {
+        fm_rds_scan_result result = {};
+        result.gain = gain;
+
+        std::unique_ptr<rtldevice> device = create_device(settings);
+        device->set_frequency_correction(settings.device_frequency_correction);
+        uint32_t const actual_sample_rate = device->set_sample_rate(fm_sample_rate);
+        uint32_t const actual_frequency =
+            device->set_center_frequency(frequency + (actual_sample_rate / 4));
+        device->set_automatic_gain_control(false);
+        device->set_gain(gain);
+
+        tDemodInfo demodinfo = {};
+        demodinfo.HiCutmax = 100000;
+        demodinfo.HiCut = 100000;
+        demodinfo.LowCut = -100000;
+        demodinfo.SquelchValue = -160;
+        demodinfo.WfmDownsampleQuality =
+            static_cast<enum DownsampleQuality>(settings.fmradio_downsample_quality);
+
+        CDemodulator demodulator;
+        demodulator.SetUSFmVersion(is_north_america);
+        demodulator.SetInputSampleRate(static_cast<TYPEREAL>(actual_sample_rate));
+        demodulator.SetDemod(DEMOD_WFM, demodinfo);
+        demodulator.SetDemodFreq(static_cast<TYPEREAL>(actual_frequency - frequency));
+
+        rdsdecoder decoder(is_north_america);
+
+        int const input_samples = demodulator.GetInputBufferLimit();
+        size_t const readsize = static_cast<size_t>(input_samples) * 2;
+
+        std::atomic_bool found_name{false};
+        std::atomic<int> quality{0};
+        std::atomic<int> snr{0};
+        std::atomic<uint64_t> bytes{0};
+        std::exception_ptr reader_exception = nullptr;
+        std::mutex result_lock;
+
+        device->begin_stream();
+
+        std::thread reader_thread([&]() -> void
+        {
+          try
+          {
+            device->read_async(
+                [&](uint8_t const* buffer, size_t count) -> void
+                {
+                  bytes.fetch_add(static_cast<uint64_t>(count));
+
+                  if (count != readsize)
+                    return;
+
+                  std::unique_ptr<TYPECPX[]> samples(new TYPECPX[input_samples]);
+                  for (int index = 0; index < input_samples; index++)
+                  {
+                    samples[index] = {
+
+#ifdef FMDSP_USE_DOUBLE_PRECISION
+                        (static_cast<TYPEREAL>(buffer[(index * 2)]) - 127.5) *
+                            256.9960784313725,
+                        (static_cast<TYPEREAL>(buffer[(index * 2) + 1]) - 127.5) *
+                            256.9960784313725,
+#else
+                        (static_cast<TYPEREAL>(buffer[(index * 2)]) - 127.5f) *
+                            256.9960784313725f,
+                        (static_cast<TYPEREAL>(buffer[(index * 2) + 1]) - 127.5f) *
+                            256.9960784313725f,
+#endif
+                    };
+                  }
+
+                  demodulator.ProcessData(input_samples, samples.get(), samples.get());
+
+                  tRDS_GROUPS rdsgroup = {};
+                  while (demodulator.GetNextRdsGroupData(&rdsgroup))
+                    decoder.decode_rdsgroup(rdsgroup);
+
+                  TYPEREAL demodquality = 0;
+                  TYPEREAL demodsnr = 0;
+                  demodulator.GetSignalLevels(demodquality, demodsnr);
+
+                  int const q =
+                      std::max(0, std::min(100,
+                          static_cast<int>(100.0 * (demodquality / 0.80))));
+                  int const s =
+                      std::max(0, std::min(100,
+                          static_cast<int>(100.0 * (demodsnr / 0.60))));
+
+                  quality.store(q);
+                  snr.store(s);
+
+                  if (decoder.has_rbds_callsign())
+                  {
+                    std::lock_guard<std::mutex> guard(result_lock);
+                    result.callsign = decoder.get_rbds_callsign();
+                    result.name = result.callsign;
+                    result.found = true;
+                    found_name.store(true);
+                  }
+                  else if (decoder.has_programservice())
+                  {
+                    std::lock_guard<std::mutex> guard(result_lock);
+                    result.ps = decoder.get_programservice();
+                    result.name = result.ps;
+                    result.found = true;
+                    found_name.store(true);
+                  }
+
+                  if (decoder.has_radiotext())
+                  {
+                    std::lock_guard<std::mutex> guard(result_lock);
+                    result.radiotext = decoder.get_radiotext();
+                  }
+                },
+                static_cast<uint32_t>(readsize));
+          }
+          catch (...)
+          {
+            reader_exception = std::current_exception();
+          }
+        });
+
+        auto const started = std::chrono::steady_clock::now();
+        auto const deadline = started + scan_time;
+
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+          auto const now = std::chrono::steady_clock::now();
+          auto const elapsed = now - started;
+
+          int const q = quality.load();
+          int const s = snr.load();
+
+          if (found_name.load() && elapsed >= minimum_name_time)
+            break;
+
+          // Fast reject: weak/no usable WFM carrier after the demod has had time to settle.
+          if ((elapsed >= minimum_signal_time) && (q < 8) && (s < 8))
+            break;
+
+          if (update_progress(percent,
+                              "Scanning " + format_frequency(frequency),
+                              "gain=" + std::to_string(gain) +
+                                  " quality=" + std::to_string(q) +
+                                  " snr=" + std::to_string(s),
+                              "Found " + std::to_string(channels_found) +
+                                  " FM RDS station(s)"))
+          {
+            canceled = true;
+            break;
+          }
+
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+
+        device->cancel_async();
+        if (reader_thread.joinable())
+          reader_thread.join();
+
+        if (reader_exception)
+          std::rethrow_exception(reader_exception);
+
+        {
+          std::lock_guard<std::mutex> guard(result_lock);
+          result.quality = quality.load();
+          result.snr = snr.load();
+          result.bytes = bytes.load();
+          result.score = score_fm_rds_scan_result(result);
+        }
+
+        return result;
+      };
+
+      connectionpool::handle dbhandle(m_connpool);
+
+      for (uint32_t frequency_index = 0, frequency = first_frequency;
+           frequency <= last_frequency;
+           frequency += step_frequency, frequency_index++)
+      {
+        if (canceled)
+          break;
+
+        int const percent =
+            static_cast<int>((static_cast<uint64_t>(frequency_index) * 100) /
+                             total_frequencies);
+
+        fm_rds_scan_result best = {};
+
+        for (int gain : scan_gains)
+        {
+          fm_rds_scan_result current = scan_one_fm(frequency, gain, percent);
+
+          if (current.found && !current.name.empty())
+          {
+            if (!best.found || (current.score > best.score))
+              best = current;
+          }
+
+          if (canceled)
+            break;
+        }
+
+        if (canceled)
+          break;
+
+        if (!best.found || best.name.empty())
+          continue;
+
+        struct channelprops channelprops = {};
+        channelprops.frequency = frequency;
+        channelprops.modulation = modulation::fm;
+        channelprops.name = best.name;
+        channelprops.autogain = false;
+        channelprops.manualgain = best.gain;
+        channelprops.freqcorrection = 0;
+
+        bool exists = channel_exists(dbhandle, channelprops);
+        if (exists)
+        {
+          get_channel_properties(dbhandle,
+                                 channelprops.frequency,
+                                 channelprops.modulation,
+                                 channelprops);
+
+          channelprops.name = best.name;
+          channelprops.autogain = false;
+          channelprops.manualgain = best.gain;
+        }
+
+        if (!exists)
+          add_channel(dbhandle, channelprops);
+        else
+          update_channel(dbhandle, channelprops);
+
+        channels_found++;
+
+        log_info(__func__,
+                 ": FM RDS scan found ",
+                 best.name,
+                 " at ",
+                 format_frequency(frequency),
+                 " gain=",
+                 best.gain,
+                 " quality=",
+                 best.quality,
+                 " snr=",
+                 best.snr,
+                 " bytes=",
+                 best.bytes);
+      }
+
+      progress.SetPercentage(canceled ? 95 : 100);
+      std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+      TriggerChannelUpdate();
+      TriggerChannelGroupsUpdate();
+
+      if (canceled)
+      {
+        kodi::gui::dialogs::OK::ShowAndGetInput(
+            "FM Radio RDS scan canceled",
+            std::to_string(channels_found) + " FM RDS station(s) found before cancel.");
+      }
+      else
+      {
+        kodi::gui::dialogs::OK::ShowAndGetInput(
+            "FM Radio RDS scan complete",
+            std::to_string(channels_found) + " FM RDS station(s) added or updated.");
+      }
+
+      return;
+    }
+    // FM_RDS_SCAN_BRANCH_END
+
+    if (scan_modulation == modulation::wx)
+    {
+      struct wx_named_channel
+      {
+        uint32_t frequency = 0;
+        std::string name;
+      };
+
+      struct wx_scan_measurement
+      {
+        int gain = 0;
+        float best_power = -999.0f;
+        float best_snr = -999.0f;
+        bool overload = false;
+        int reports = 0;
+        bool detected = false;
+      };
+
+      // WX_SCAN_PROGRESS_DETAILS_HELPER
+      auto wx_gain_text = [](int gain) -> std::string
+      {
+        char buffer[32] = {};
+        snprintf(buffer, sizeof(buffer), "%.1f dB",
+                 static_cast<double>(gain) / 10.0);
+        return std::string(buffer);
+      };
+
+      auto wx_measurement_text =
+          [&](wx_scan_measurement const& measurement) -> std::string
+      {
+        char buffer[192] = {};
+        snprintf(buffer, sizeof(buffer),
+                 "gain=%s power=%.1f snr=%.1f reports=%d%s%s",
+                 wx_gain_text(measurement.gain).c_str(),
+                 measurement.best_power,
+                 measurement.best_snr,
+                 measurement.reports,
+                 measurement.detected ? " detected" : " no carrier",
+                 measurement.overload ? " overload" : "");
+        return std::string(buffer);
+      };
+
+
+      std::vector<wx_named_channel> wx_channels;
+
+      {
+        connectionpool::handle dbhandle(m_connpool);
+
+        enumerate_namedchannels(dbhandle, modulation::wx,
+                                [&](struct namedchannel const& item) -> void
+        {
+          if ((item.frequency > 0) && (item.name != nullptr))
+          {
+            wx_named_channel channel;
+            channel.frequency = item.frequency;
+            channel.name = item.name;
+            wx_channels.emplace_back(std::move(channel));
+          }
+        });
+      }
+
+      if (wx_channels.empty())
+      {
+        kodi::gui::dialogs::OK::ShowAndGetInput(
+            "Weather Radio scan",
+            "No Weather Radio channels were enumerated from the database.");
+        return;
+      }
+
+      std::vector<int> valid_gains;
+      {
+        std::unique_ptr<rtldevice> gain_device = create_device(settings);
+        gain_device->get_valid_gains(valid_gains);
+      }
+
+      if (valid_gains.empty())
+      {
+        valid_gains = {
+            0, 9, 14, 27, 37, 77, 87, 125, 144, 157,
+            166, 197, 207, 229, 254, 280, 297, 328,
+            338, 364, 372, 386, 402, 421, 434, 439,
+            445, 480, 496};
+      }
+
+      auto nearest_valid_gain = [&](int desired) -> int
+      {
+        int best = valid_gains.front();
+        int best_delta = std::abs(best - desired);
+
+        for (int gain : valid_gains)
+        {
+          int const delta = std::abs(gain - desired);
+          if (delta < best_delta)
+          {
+            best = gain;
+            best_delta = delta;
+          }
+        }
+
+        return best;
+      };
+
+      std::vector<int> scan_gains;
+      for (int desired : {27, 328, 197, 87})
+      {
+        int gain = nearest_valid_gain(desired);
+        if (std::find(scan_gains.begin(), scan_gains.end(), gain) == scan_gains.end())
+          scan_gains.emplace_back(gain);
+      }
+
+      auto measure_wx =
+          [&](uint32_t frequency, int gain) -> wx_scan_measurement
+      {
+        wx_scan_measurement measurement;
+        measurement.gain = gain;
+
+        struct signalprops signalprops = {};
+        signalprops.filter = false;
+        signalprops.samplerate = 1600000;
+        signalprops.bandwidth = 200000;
+        signalprops.lowcut = -8000;
+        signalprops.highcut = 8000;
+        signalprops.offset = signalprops.samplerate / 4;
+
+        struct signalplotprops plotprops = {};
+        plotprops.height = 200;
+        plotprops.width = 512;
+        plotprops.mindb = -72.0f;
+        plotprops.maxdb = 4.0f;
+
+        std::mutex status_mutex;
+
+        std::unique_ptr<signalmeter> meter =
+            signalmeter::create(signalprops, plotprops, 200,
+                                [&](struct signalmeter::signal_status const& status) -> void
+        {
+          std::lock_guard<std::mutex> status_lock(status_mutex);
+
+          measurement.reports += 1;
+          measurement.overload = measurement.overload || status.overload;
+
+          if (!std::isnan(status.power) && status.power > measurement.best_power)
+            measurement.best_power = status.power;
+
+          if (!std::isnan(status.snr) && status.snr > measurement.best_snr)
+            measurement.best_snr = status.snr;
+        });
+
+        std::unique_ptr<rtldevice> device = create_device(settings);
+        device->set_center_frequency(frequency + signalprops.offset);
+        device->set_frequency_correction(settings.device_frequency_correction);
+        device->set_sample_rate(signalprops.samplerate);
+        device->set_automatic_gain_control(false);
+        device->set_gain(gain);
+        device->begin_stream();
+
+        size_t const buffer_size = 32 KiB;
+        std::unique_ptr<uint8_t[]> buffer(new uint8_t[buffer_size]);
+
+        auto const end_time =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(2200);
+
+        while (std::chrono::steady_clock::now() < end_time)
+        {
+          size_t const count = device->read(buffer.get(), buffer_size);
+          if (count > 0)
+            meter->inputsamples(buffer.get(), count);
+        }
+
+        {
+          std::lock_guard<std::mutex> status_lock(status_mutex);
+
+          // NOAA Weather Radio is narrowband FM. A real carrier should stand
+          // clearly above the nearby noise bins. Keep this intentionally modest
+          // so weak but listenable WX stations are not missed.
+          measurement.detected =
+              measurement.reports >= 2 &&
+              measurement.best_snr >= 5.0f &&
+              measurement.best_power > -65.0f;
+        }
+
+        return measurement;
+      };
+
+      int channels_added = 0;
+      bool canceled = false;
+
+      kodi::gui::dialogs::CProgress progress;
+      progress.SetHeading("Weather Radio scan");
+      progress.SetCanCancel(true);
+      progress.ShowProgressBar(true);
+      progress.SetPercentage(0);
+      progress.SetLine(0, "Preparing RTL-SDR tuner...");
+      progress.SetLine(1, "Scanning WX1-WX7");
+      progress.SetLine(2, "Press Cancel to stop");
+      progress.Open();
+
+      for (size_t index = 0; index < wx_channels.size(); ++index)
+      {
+        wx_named_channel const& wx = wx_channels[index];
+
+        char freq_text[128]{};
+        std::snprintf(freq_text,
+                      std::extent<decltype(freq_text)>::value,
+                      "%s %u.%03u MHz",
+                      wx.name.c_str(),
+                      wx.frequency / 1000000,
+                      (wx.frequency % 1000000) / 1000);
+
+        int const percent =
+            static_cast<int>((index * 100) / std::max<size_t>(wx_channels.size(), 1));
+
+        progress.SetPercentage(percent);
+        progress.SetLine(0, freq_text);
+        progress.SetLine(1, "Measuring signal...");
+        progress.SetLine(2, "Press Cancel to stop");
+
+        if (progress.IsCanceled())
+        {
+          canceled = true;
+          break;
+        }
+
+        wx_scan_measurement best;
+
+        for (int gain : scan_gains)
+        {
+          // WX_SCAN_PROGRESS_DETAILS_PER_GAIN
+          progress.SetLine(1, "gain=" + wx_gain_text(gain) + " measuring");
+          progress.SetLine(2, "Waiting for Weather Radio signal reports");
+          wx_scan_measurement measurement = measure_wx(wx.frequency, gain);
+          progress.SetLine(1, wx_measurement_text(measurement));
+          progress.SetLine(2, measurement.detected ? "Detected candidate" : "No usable carrier");
+
+          kodi::Log(ADDON_LOG_DEBUG,
+                    "WX_SCAN freq=%u name='%s' gain=%d reports=%d power=%.1f snr=%.1f overload=%d detected=%d",
+                    wx.frequency,
+                    wx.name.c_str(),
+                    gain,
+                    measurement.reports,
+                    measurement.best_power,
+                    measurement.best_snr,
+                    measurement.overload ? 1 : 0,
+                    measurement.detected ? 1 : 0);
+
+          if (measurement.best_snr > best.best_snr)
+            best = measurement;
+
+          if (measurement.detected)
+            break;
+
+          if (progress.IsCanceled())
+          {
+            canceled = true;
+            break;
+          }
+        }
+
+        if (canceled)
+          break;
+
+        if (best.detected)
+        {
+          connectionpool::handle dbhandle(m_connpool);
+
+          struct channelprops channelprops = {};
+          channelprops.frequency = wx.frequency;
+          channelprops.modulation = modulation::wx;
+          channelprops.name = wx.name;
+          channelprops.autogain = false;
+          channelprops.manualgain = best.gain;
+          channelprops.freqcorrection = 0;
+
+          bool const exists = channel_exists(dbhandle, channelprops);
+          if (exists)
+          {
+            get_channel_properties(dbhandle,
+                                   channelprops.frequency,
+                                   channelprops.modulation,
+                                   channelprops);
+            channelprops.name = wx.name;
+            channelprops.autogain = false;
+            channelprops.manualgain = best.gain;
+            update_channel(dbhandle, channelprops);
+          }
+          else
+          {
+            add_channel(dbhandle, channelprops);
+          }
+
+          channels_added += 1;
+
+          kodi::Log(ADDON_LOG_INFO,
+                    "WX_SCAN added freq=%u name='%s' gain=%d snr=%.1f power=%.1f",
+                    wx.frequency,
+                    wx.name.c_str(),
+                    best.gain,
+                    best.best_snr,
+                    best.best_power);
+        }
+      }
+
+      progress.SetPercentage(100);
+
+      if (canceled)
+      {
+        kodi::gui::dialogs::OK::ShowAndGetInput(
+            "Weather Radio scan",
+            "Scan canceled.",
+            "",
+            std::to_string(channels_added) + " Weather Radio channel(s) added or updated.");
+      }
+      else
+      {
+        kodi::gui::dialogs::OK::ShowAndGetInput(
+            "Weather Radio scan",
+            "Scan complete.",
+            "",
+            std::to_string(channels_added) + " Weather Radio channel(s) added or updated.");
+      }
+
+      return;
+    }
+
+    if (!settings.hdradio_enable)
+    {
+      kodi::gui::dialogs::OK::ShowAndGetInput(
+          "HD Radio scan",
+          "HD Radio support is disabled in the add-on settings.");
+      return;
+    }
+
+    struct gain_scan_result
+    {
+      int gain = 0;
+      bool sync = false;
+      bool has_subchannels = false;
+      uint64_t bytes = 0;
+      muxscanner::multiplex muxdata = {};
+    };
+
+    try
+    {
+      uint32_t const sample_rate = 1488375;
+      uint32_t const first_frequency =
+          single_frequency_hd_scan ? selected_single_hd_frequency : 87900000;
+      uint32_t const last_frequency =
+          single_frequency_hd_scan ? selected_single_hd_frequency : 107900000;
+      uint32_t const step_frequency = 200000;
+      uint32_t const total_frequencies = ((last_frequency - first_frequency) / step_frequency) + 1;
+
+      // Coarse gains based on your measured Seattle gain JSON:
+      // high ~= 197, mid ~= 87, low ~= 27, in tenths of dB.
+      std::vector<int> coarse_gain_targets = {328, 197, 87, 27};
+
+      auto const coarse_scan_time = std::chrono::seconds(8);
+      auto const coarse_minimum_time = std::chrono::seconds(3);
+
+      auto const fine_scan_time = std::chrono::seconds(6);
+      auto const fine_minimum_time = std::chrono::seconds(4);
+
+      auto const final_scan_time = std::chrono::seconds(18);
+      auto const final_minimum_time = std::chrono::seconds(5);
+      auto const subchannel_quiet_time = std::chrono::seconds(4);
+
+      int muxes_found = 0;
+      int subchannels_found = 0;
+      bool canceled = false;
+
+      kodi::gui::dialogs::CProgress progress;
+      progress.SetHeading(single_frequency_hd_scan ? "HD Radio single-frequency scan" : "HD Radio scan");
+      progress.SetCanCancel(true);
+      progress.ShowProgressBar(true);
+      progress.SetPercentage(0);
+      progress.SetLine(0, "Preparing RTL-SDR tuner...");
+      progress.SetLine(1, "Manual gain scan");
+      progress.SetLine(2, "Press Cancel to stop");
+      progress.Open();
+
+      auto update_progress =
+          [&](int percent,
+              std::string const& line0,
+              std::string const& line1,
+              std::string const& line2) -> bool
+      {
+        if (percent < 0)
+          percent = 0;
+        if (percent > 100)
+          percent = 100;
+
+        progress.SetPercentage(percent);
+        progress.SetLine(0, line0);
+        progress.SetLine(1, line1);
+        progress.SetLine(2, line2);
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        return progress.IsCanceled();
+      };
+
+      std::vector<int> valid_gains;
+
+      {
+        std::unique_ptr<rtldevice> gain_device = create_device(settings);
+        gain_device->get_valid_gains(valid_gains);
+      }
+
+      if (valid_gains.empty())
+      {
+        // Fallback R820T/R820T2-style values, in tenths of dB.
+        valid_gains = {
+            0, 9, 14, 27, 37, 77, 87, 125, 144, 157,
+            166, 197, 207, 229, 254, 280, 297, 328,
+            338, 364, 372, 386, 402, 421, 434, 439,
+            445, 480, 496};
+      }
+
+      std::sort(valid_gains.begin(), valid_gains.end());
+      valid_gains.erase(std::unique(valid_gains.begin(), valid_gains.end()), valid_gains.end());
+
+      auto nearest_valid_gain = [&](int target) -> int
+      {
+        auto best = valid_gains.front();
+        auto best_distance = std::abs(best - target);
+
+        for (auto gain : valid_gains)
+        {
+          auto distance = std::abs(gain - target);
+          if (distance < best_distance)
+          {
+            best = gain;
+            best_distance = distance;
+          }
+        }
+
+        return best;
+      };
+
+      std::vector<int> coarse_gains;
+
+      for (auto target : coarse_gain_targets)
+        coarse_gains.push_back(nearest_valid_gain(target));
+
+      std::sort(coarse_gains.begin(), coarse_gains.end(), std::greater<int>());
+      coarse_gains.erase(std::unique(coarse_gains.begin(), coarse_gains.end()), coarse_gains.end());
+
+      auto quality_score = [](gain_scan_result const& result) -> float
+        {
+          // TEMP_MER_TIEBREAK_SCORE_MUXDATA_ONLY
+          //
+          // Lower score is better. Use muxdata because gain_scan_result itself
+          // does not have direct ber/mer fields.
+          float const ber = result.muxdata.ber_valid ? result.muxdata.cber : 1.0f;
+          float const mer = result.muxdata.mer_valid
+                                ? (result.muxdata.mer_lower + result.muxdata.mer_upper) / 2.0f
+                                : -100.0f;
+
+          // Zero/tiny BER bucket: prefer higher MER.
+          if (ber <= 0.0000005f)
+            return -std::max(0.0f, mer) * 0.000000001f;
+
+          // Non-zero BER: BER dominates; MER only nudges close ties.
+          return ber - (std::max(0.0f, mer) * 0.000000001f);
+        };
+
+      connectionpool::handle dbhandle(m_connpool);
+
+      std::function<gain_scan_result(uint32_t,
+                                     int,
+                                     std::chrono::seconds,
+                                     std::chrono::seconds,
+                                     bool,
+                                     char const*,
+                                     int)> scan_one_gain;
+
+      scan_one_gain =
+          [&](uint32_t frequency,
+              int gain,
+              std::chrono::seconds scan_time,
+              std::chrono::seconds minimum_time,
+              bool stop_after_sync_only,
+              char const* freq_label,
+              int percent) -> gain_scan_result
+      {
+        gain_scan_result result = {};
+        result.gain = gain;
+
+        muxscanner::multiplex muxdata = {};
+        std::mutex muxlock;
+
+        std::unique_ptr<muxscanner> scanner =
+            hdmuxscanner::create(
+                sample_rate,
+                frequency,
+                [&](muxscanner::multiplex const& data) -> void
+                {
+                  std::lock_guard<std::mutex> guard(muxlock);
+                  muxdata = data;
+                });
+
+        std::unique_ptr<rtldevice> device = create_device(settings);
+
+        device->set_frequency_correction(0);
+        device->set_sample_rate(sample_rate);
+        device->set_center_frequency(frequency);
+        device->set_automatic_gain_control(false);
+        device->set_gain(gain);
+        device->begin_stream();
+
+        std::atomic<uint64_t> sample_bytes{0};
+        std::exception_ptr reader_exception = nullptr;
+
+        std::thread reader_thread([&]() -> void
+        {
+          try
+          {
+            device->read_async(
+                [&](uint8_t const* samples, size_t count) -> void
+                {
+                  sample_bytes.fetch_add(static_cast<uint64_t>(count));
+                  scanner->inputsamples(samples, count);
+                },
+                32768);
+          }
+          catch (...)
+          {
+            reader_exception = std::current_exception();
+          }
+        });
+
+        auto const started = std::chrono::steady_clock::now();
+        auto const deadline = started + scan_time;
+        auto next_ui_update = started + std::chrono::milliseconds(250);
+
+        size_t last_subchannel_count = 0;
+        auto last_subchannel_change = started;
+
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+          auto const now = std::chrono::steady_clock::now();
+
+          bool current_sync = false;
+          size_t current_subchannel_count = 0;
+          float current_cber = 1.0f;
+          bool current_ber_valid = false;
+
+          {
+            std::lock_guard<std::mutex> guard(muxlock);
+            current_sync = muxdata.sync;
+            current_subchannel_count = muxdata.subchannels.size();
+            current_ber_valid = muxdata.ber_valid;
+            current_cber = muxdata.cber;
+          }
+
+          if (current_subchannel_count > last_subchannel_count)
+          {
+            last_subchannel_count = current_subchannel_count;
+            last_subchannel_change = now;
+
+            log_info(__func__,
+                     ": ",
+                     freq_label,
+                     " MHz gain=",
+                     gain,
+                     " now has ",
+                     current_subchannel_count,
+                     " HD subchannel candidate(s)");
+          }
+
+          if (now >= next_ui_update)
+          {
+            std::string quality =
+                current_ber_valid
+                    ? (std::string("BER ") + std::to_string(current_cber))
+                    : std::string("waiting for BER");
+
+            if (update_progress(
+                    percent,
+                    std::string("Scanning ") + freq_label + " MHz HD",
+                    std::string("gain ") + std::to_string(gain) + " / " + quality,
+                    std::to_string(current_subchannel_count) +
+                        " candidate HD channel(s), read " +
+                        std::to_string(sample_bytes.load() / 1024) +
+                        " KiB"))
+            {
+              canceled = true;
+              break;
+            }
+
+            next_ui_update = now + std::chrono::milliseconds(250);
+          }
+
+          if (current_sync &&
+              stop_after_sync_only &&
+              (now - started) >= minimum_time)
+          {
+            break;
+          }
+
+          if (current_sync &&
+              !stop_after_sync_only &&
+              current_subchannel_count > 0 &&
+              (now - started) >= minimum_time &&
+              (now - last_subchannel_change) >= subchannel_quiet_time)
+          {
+            break;
+          }
+
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
+        device->cancel_async();
+
+        if (reader_thread.joinable())
+          reader_thread.join();
+
+        if (reader_exception)
+        {
+          try
+          {
+            std::rethrow_exception(reader_exception);
+          }
+          catch (std::exception& ex)
+          {
+            log_info(__func__,
+                     ": async reader stopped at ",
+                     freq_label,
+                     " MHz gain=",
+                     gain,
+                     ": ",
+                     ex.what());
+          }
+          catch (...)
+          {
+            log_info(__func__,
+                     ": async reader stopped at ",
+                     freq_label,
+                     " MHz gain=",
+                     gain);
+          }
+        }
+
+        device.reset();
+
+        {
+          std::lock_guard<std::mutex> guard(muxlock);
+          result.muxdata = muxdata;
+        }
+
+        result.sync = result.muxdata.sync;
+        result.has_subchannels = !result.muxdata.subchannels.empty();
+        result.bytes = sample_bytes.load();
+
+        log_info(__func__,
+                 ": gain test ",
+                 freq_label,
+                 " MHz gain=",
+                 gain,
+                 " sync=",
+                 result.sync ? "yes" : "no",
+                 " subchannels=",
+                 result.muxdata.subchannels.size(),
+                 " ber=",
+                 result.muxdata.ber_valid ? std::to_string(result.muxdata.cber) : "n/a",
+                 " mer=",
+                 result.muxdata.mer_valid
+                     ? std::to_string((result.muxdata.mer_lower + result.muxdata.mer_upper) / 2.0f)
+                     : "n/a",
+                 " bytes=",
+                 result.bytes);
+
+        return result;
+      };
+
+      uint32_t frequency_index = 0;
+
+      for (uint32_t frequency = first_frequency;
+           frequency <= last_frequency;
+           frequency += step_frequency, ++frequency_index)
+      {
+        char freq_label[64] = {};
+        snprintf(freq_label,
+                 sizeof(freq_label),
+                 "%u.%u",
+                 frequency / 1000000,
+                 (frequency % 1000000) / 100000);
+
+        int percent = static_cast<int>((frequency_index * 100) / total_frequencies);
+
+        if (update_progress(
+                percent,
+                std::string("Scanning ") + freq_label + " MHz HD",
+                std::to_string(muxes_found) +
+                    " station(s), " +
+                    std::to_string(subchannels_found) +
+                    " HD channel(s) found",
+                "Trying high/mid/low manual gain"))
+        {
+          canceled = true;
+          break;
+        }
+
+        log_info(__func__,
+                 ": scanning ",
+                 freq_label,
+                 " MHz HD with manual gain search");
+
+        std::vector<gain_scan_result> coarse_locks;
+        gain_scan_result locked = {};
+        bool found_lock = false;
+
+        for (auto coarse_gain : coarse_gains)
+        {
+          auto coarse =
+              scan_one_gain(frequency,
+                            coarse_gain,
+                            coarse_scan_time,
+                            coarse_minimum_time,
+                            true,
+                            freq_label,
+                            percent);
+
+          if (canceled)
+            break;
+
+          if (coarse.sync)
+          {
+            coarse_locks.push_back(coarse);
+
+            float coarse_score = quality_score(coarse);
+
+            log_info(__func__,
+                     ": coarse lock at ",
+                     freq_label,
+                     " MHz gain=",
+                     coarse_gain,
+                     " score=",
+                     coarse_score,
+                     " ber=",
+                     coarse.muxdata.ber_valid ? std::to_string(coarse.muxdata.cber) : "n/a",
+                     " subchannels=",
+                     coarse.muxdata.subchannels.size());
+
+            if (!found_lock)
+            {
+              locked = coarse;
+              found_lock = true;
+            }
+            else
+            {
+              float locked_score = quality_score(locked);
+
+              if (coarse_score < locked_score ||
+                  (coarse_score == locked_score &&
+                   coarse.muxdata.subchannels.size() > locked.muxdata.subchannels.size()))
+              {
+                locked = coarse;
+              }
+            }
+          }
+        }
+
+        if (canceled)
+          break;
+
+        if (!found_lock)
+        {
+          log_info(__func__,
+                   ": no HD lock at ",
+                   freq_label,
+                   " MHz using coarse gains high/mid/low");
+          continue;
+        }
+
+        // Fine tune around every coarse gain that locked.
+        // Use a wider window because the best gain is often at the edge
+        // of the original +/-50 search range.
+        int const fine_gain_window = 200;
+
+        std::vector<int> fine_gains;
+
+        auto add_fine_window = [&](int center_gain) -> void
+        {
+          for (auto gain : valid_gains)
+          {
+            if (std::abs(gain - center_gain) <= fine_gain_window)
+              fine_gains.push_back(gain);
+          }
+        };
+
+        for (auto const& coarse_lock : coarse_locks)
+          add_fine_window(coarse_lock.gain);
+
+        add_fine_window(locked.gain);
+
+        std::sort(fine_gains.begin(), fine_gains.end());
+        fine_gains.erase(std::unique(fine_gains.begin(), fine_gains.end()), fine_gains.end());
+
+        log_info(__func__,
+                 ": fine tuning ",
+                 freq_label,
+                 " MHz using ",
+                 fine_gains.size(),
+                 " candidate gain(s) within +/-",
+                 fine_gain_window,
+                 " of coarse lock(s)");
+
+        gain_scan_result best = locked;
+        float best_score = quality_score(best);
+
+        auto gain_is_better = [&](gain_scan_result const& candidate,
+                                  gain_scan_result const& current,
+                                  float candidate_score,
+                                  float current_score) -> bool
+        {
+          // TEMP_EXPLICIT_MER_TIEBREAK_MUXDATA_ONLY
+          //
+          // Prefer more decoded HD subchannels. If subchannel count is the same,
+          // BER remains primary. If BER/score is effectively tied, prefer
+          // higher MER. Use muxdata only.
+          size_t const candidate_subchannels = candidate.muxdata.subchannels.size();
+          size_t const current_subchannels = current.muxdata.subchannels.size();
+
+          if (candidate_subchannels != current_subchannels)
+            return candidate_subchannels > current_subchannels;
+
+          float const candidate_ber =
+              candidate.muxdata.ber_valid ? candidate.muxdata.cber : 1.0f;
+          float const current_ber =
+              current.muxdata.ber_valid ? current.muxdata.cber : 1.0f;
+
+          float const candidate_mer =
+              candidate.muxdata.mer_valid
+                  ? (candidate.muxdata.mer_lower + candidate.muxdata.mer_upper) / 2.0f
+                  : -100.0f;
+          float const current_mer =
+              current.muxdata.mer_valid
+                  ? (current.muxdata.mer_lower + current.muxdata.mer_upper) / 2.0f
+                  : -100.0f;
+
+          if (candidate_ber <= 0.0000005f && current_ber <= 0.0000005f)
+            return candidate_mer > current_mer;
+
+          if (std::abs(candidate_score - current_score) <= 0.0000005f ||
+              std::abs(candidate_ber - current_ber) <= 0.0000005f)
+            return candidate_mer > current_mer;
+
+          return candidate_ber < current_ber;
+        };
+
+        for (auto fine_gain : fine_gains)
+        {
+          auto fine =
+              scan_one_gain(frequency,
+                            fine_gain,
+                            fine_scan_time,
+                            fine_minimum_time,
+                            true,
+                            freq_label,
+                            percent);
+
+          if (canceled)
+            break;
+
+          if (!fine.sync)
+            continue;
+
+          float score = quality_score(fine);
+
+          if (!best.sync || gain_is_better(fine, best, score, best_score))
+          {
+            best = fine;
+            best_score = score;
+          }
+        }
+
+        if (canceled)
+          break;
+
+        log_info(__func__,
+                 ": best gain for ",
+                 freq_label,
+                 " MHz is ",
+                 best.gain,
+                 " score=",
+                 best_score,
+                 " ber=",
+                 best.muxdata.ber_valid ? std::to_string(best.muxdata.cber) : "n/a",
+                 " mer=",
+                 best.muxdata.mer_valid
+                     ? std::to_string((best.muxdata.mer_lower + best.muxdata.mer_upper) / 2.0f)
+                     : "n/a");
+
+        // Do the final full scan at the best gain to collect all subchannels.
+        auto final =
+            scan_one_gain(frequency,
+                          best.gain,
+                          final_scan_time,
+                          final_minimum_time,
+                          false,
+                          freq_label,
+                          percent);
+
+        if (canceled)
+          break;
+
+        if (!final.sync || final.muxdata.subchannels.empty())
+        {
+          log_info(__func__,
+                   ": lock existed at ",
+                   freq_label,
+                   " MHz but final scan found no usable subchannels at gain=",
+                   best.gain);
+          continue;
+        }
+
+        std::string muxname =
+            final.muxdata.name.empty()
+                ? std::string(freq_label).append(" HD")
+                : final.muxdata.name;
+
+        struct channelprops channelprops = {};
+        channelprops.frequency = frequency;
+        channelprops.modulation = modulation::hd;
+        channelprops.name = muxname;
+        channelprops.logourl = "";
+        channelprops.autogain = false;
+        channelprops.manualgain = best.gain;
+        channelprops.freqcorrection = 0;
+
+        std::vector<subchannelprops> subchannels;
+
+        for (auto const& scanned : final.muxdata.subchannels)
+        {
+          struct subchannelprops subchannel = {};
+          subchannel.number = scanned.number;
+          subchannel.logourl = "";
+
+          if (!final.muxdata.name.empty())
+            subchannel.name = muxname + " " + scanned.name;
+          else
+            subchannel.name = std::string(freq_label).append(" ").append(scanned.name);
+
+          subchannels.emplace_back(std::move(subchannel));
+        }
+
+        bool const exists = channel_exists(dbhandle, channelprops);
+
+        if (exists)
+          update_channel(dbhandle, channelprops, subchannels);
+        else
+          add_channel(dbhandle, channelprops, subchannels);
+
+        muxes_found++;
+        subchannels_found += static_cast<int>(subchannels.size());
+
+        update_progress(
+            percent,
+            std::string("Found ") + muxname,
+            std::to_string(muxes_found) +
+                " station(s), " +
+                std::to_string(subchannels_found) +
+                " HD channel(s) found",
+            std::string("Best gain ") +
+                std::to_string(best.gain) +
+                ", BER " +
+                (best.muxdata.ber_valid ? std::to_string(best.muxdata.cber) : "n/a"));
+
+        log_info(__func__,
+                 ": found ",
+                 muxname,
+                 " at ",
+                 freq_label,
+                 " MHz with ",
+                 subchannels.size(),
+                 " HD subchannel(s), best_gain=",
+                 best.gain,
+                 ", ber=",
+                 final.muxdata.ber_valid ? std::to_string(final.muxdata.cber) : "n/a");
+      }
+
+      progress.SetPercentage(canceled ? static_cast<int>((frequency_index * 100) / total_frequencies) : 100);
+      std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+      TriggerChannelUpdate();
+      TriggerChannelGroupsUpdate();
+
+      if (canceled)
+      {
+        kodi::gui::dialogs::OK::ShowAndGetInput(
+            "HD Radio scan canceled",
+            std::to_string(muxes_found) + " HD station(s) found before cancel.",
+            "",
+            std::to_string(subchannels_found) + " HD subchannel(s) added or updated.");
+      }
+      else
+      {
+        kodi::gui::dialogs::OK::ShowAndGetInput(
+            "HD Radio scan complete",
+            std::to_string(muxes_found) + " HD station(s) found.",
+            "",
+            std::to_string(subchannels_found) + " HD subchannel(s) added or updated.");
+      }
+    }
+    catch (std::exception& ex)
+    {
+      handle_stdexception(__func__, ex);
+
+      kodi::gui::dialogs::OK::ShowAndGetInput(
+          "HD Radio scan failed",
+          "An error occurred during automatic HD Radio scan:",
+          "",
+          ex.what());
+    }
+    catch (...)
+    {
+      handle_generalexception(__func__, PVR_ERROR::PVR_ERROR_FAILED);
+    }
+  }).detach();
+
+  return PVR_ERROR::PVR_ERROR_NO_ERROR;
 }
 
 //-----------------------------------------------------------------------------
@@ -2733,6 +4374,14 @@ PVR_ERROR addon::OpenDialogChannelSettings(kodi::addon::PVRChannel const& channe
 
 bool addon::OpenLiveStream(kodi::addon::PVRChannel const& channel)
 {
+
+
+
+
+
+
+
+
   // Prevent race condition with GetSignalStatus()
   std::unique_lock<std::mutex> lock(m_pvrstream_lock);
 

@@ -62,12 +62,19 @@ public:
   //
   // Structure used to report the multiplex properties
   struct multiplex
-  {
+{
 
     bool sync; // Sync (lock) flag
     std::string name; // Multiplex name
     std::vector<struct subchannel> subchannels; // Multiplex subchannels
-  };
+  
+    bool ber_valid = false;            // BER has been reported
+    float cber = 1.0f;                 // Current bit error rate; lower is better
+
+    bool mer_valid = false;            // MER has been reported
+    float mer_lower = 0.0f;            // Lower sideband MER
+    float mer_upper = 0.0f;            // Upper sideband MER
+};
 
   // callback
   //
