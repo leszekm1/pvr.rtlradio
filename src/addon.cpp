@@ -3679,9 +3679,7 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
 
       // Coarse gains based on your measured Seattle gain JSON:
       // high ~= 197, mid ~= 87, low ~= 27, in tenths of dB.
-      std::vector<int> coarse_gain_targets = hd_am_scan
-                                                 ? std::vector<int>{0}
-                                                 : std::vector<int>{328, 197, 87, 27};
+      std::vector<int> coarse_gain_targets = {328, 197, 87, 27};
 
       auto const coarse_scan_time = std::chrono::seconds(8);
       auto const coarse_minimum_time = std::chrono::seconds(3);
@@ -3708,7 +3706,8 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
       progress.ShowProgressBar(true);
       progress.SetPercentage(0);
       progress.SetLine(0, "Preparing RTL-SDR tuner...");
-      progress.SetLine(1, hd_am_scan ? "Q-branch direct sampling" : "Manual gain scan");
+      progress.SetLine(1, hd_am_scan ? "Q-branch direct sampling; manual gain scan"
+                                    : "Manual gain scan");
       progress.SetLine(2, "Press Cancel to stop");
       progress.Open();
 
@@ -3912,7 +3911,7 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
 
             if (update_progress(
                     percent,
-                    std::string("Scanning ") + freq_label + " MHz HD",
+                    std::string("Scanning ") + freq_label + frequency_unit + " HD",
                     std::string("gain ") + std::to_string(gain) + " / " + quality,
                     std::to_string(current_subchannel_count) +
                         " candidate HD channel(s), read " +
@@ -3972,7 +3971,8 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
             log_info(__func__,
                      ": async reader stopped at ",
                      freq_label,
-                     " MHz gain=",
+                     frequency_unit,
+                     " gain=",
                      gain);
           }
         }
@@ -4137,9 +4137,6 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
           add_fine_window(coarse_lock.gain);
 
         add_fine_window(locked.gain);
-
-        if (hd_am_scan)
-          fine_gains.assign(1, locked.gain);
 
         std::sort(fine_gains.begin(), fine_gains.end());
         fine_gains.erase(std::unique(fine_gains.begin(), fine_gains.end()), fine_gains.end());
