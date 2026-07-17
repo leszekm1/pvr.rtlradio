@@ -200,6 +200,10 @@ tcpdevice::tcpdevice(char const* host, uint16_t port)
           send(m_socket, reinterpret_cast<char const*>(&command), sizeof(struct device_command), 0);
       if (result != sizeof(struct device_command))
         throw socket_exception(__func__, ": send() failed");
+
+      // A long-running rtl_tcp server retains direct-sampling state between
+      // clients. Always reset it so non-AM modes continue through the tuner.
+      set_direct_sampling(0);
     }
 
     // Shutdown and close the socket on any exception
@@ -537,6 +541,23 @@ int tcpdevice::set_gain(int db) const
 
   // Return the gain value that was actually used
   return nearest;
+}
+
+//---------------------------------------------------------------------------
+// tcpdevice::set_direct_sampling
+
+void tcpdevice::set_direct_sampling(int mode) const
+{
+  assert(m_socket != -1);
+
+  if ((mode < 0) || (mode > 2))
+    throw std::invalid_argument("mode");
+
+  struct device_command command = {0x09, htonl(mode)};
+  int result =
+      send(m_socket, reinterpret_cast<char const*>(&command), sizeof(struct device_command), 0);
+  if (result != sizeof(struct device_command))
+    throw socket_exception(__func__, ": send() failed");
 }
 
 //---------------------------------------------------------------------------

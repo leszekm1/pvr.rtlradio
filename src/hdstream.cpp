@@ -568,12 +568,16 @@ hdstream::hdstream(std::unique_ptr<rtldevice> device,
     m_muxname([](uint32_t frequency_hz) {
       // TEMP_SET_MUXNAME_FROM_FREQUENCY
       char text[32] = {};
-      snprintf(text, sizeof(text), "%.1f MHz", frequency_hz / 1000000.0);
+      if (hdradio::is_am_frequency(frequency_hz))
+        snprintf(text, sizeof(text), "%u kHz", frequency_hz / 1000);
+      else
+        snprintf(text, sizeof(text), "%.1f MHz", frequency_hz / 1000000.0);
       return std::string(text);
     }(channelprops.frequency)),
     m_pcmgain(powf(10.0f, hdprops.outputgain / 10.0f))
 {
   // Initialize the RTL-SDR device instance
+  m_device->set_direct_sampling(hdradio::is_am_frequency(channelprops.frequency) ? 2 : 0);
   m_device->set_frequency_correction(tunerprops.freqcorrection + channelprops.freqcorrection);
   m_device->set_sample_rate(SAMPLE_RATE);
   m_device->set_center_frequency(channelprops.frequency);
@@ -585,7 +589,9 @@ hdstream::hdstream(std::unique_ptr<rtldevice> device,
 
   // Initialize the HD Radio demodulator
   nrsc5_open_pipe(&m_nrsc5);
-  nrsc5_set_mode(m_nrsc5, NRSC5_MODE_FM);
+  nrsc5_set_mode(m_nrsc5,
+                 hdradio::is_am_frequency(channelprops.frequency) ? NRSC5_MODE_AM
+                                                                  : NRSC5_MODE_FM);
   nrsc5_set_callback(m_nrsc5, nrsc5_callback, this);
 
   // Create a worker thread on which to perform demodulation

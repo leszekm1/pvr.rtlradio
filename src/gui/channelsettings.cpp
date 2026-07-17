@@ -731,9 +731,9 @@ channelsettings::channelsettings(std::unique_ptr<rtldevice> device,
   {
 
     m_signalprops.samplerate = 1488375;
-    m_signalprops.bandwidth = 440 KHz;
-    m_signalprops.lowcut = -204 KHz;
-    m_signalprops.highcut = 204 KHz;
+    m_signalprops.bandwidth = hdradio::is_am_frequency(channelprops.frequency) ? 30 KHz : 440 KHz;
+    m_signalprops.lowcut = hdradio::is_am_frequency(channelprops.frequency) ? -15 KHz : -204 KHz;
+    m_signalprops.highcut = hdradio::is_am_frequency(channelprops.frequency) ? 15 KHz : 204 KHz;
     m_signalprops.offset = 0;
   }
 
@@ -771,6 +771,9 @@ channelsettings::channelsettings(std::unique_ptr<rtldevice> device,
   m_device->get_valid_gains(m_manualgains);
 
   // Set the device to match the channel properties at time of construction (prior to OnCreate)
+  m_device->set_direct_sampling(
+      (m_channelprops.modulation == modulation::hd &&
+       hdradio::is_am_frequency(m_channelprops.frequency)) ? 2 : 0);
   m_device->set_center_frequency(m_channelprops.frequency + m_signalprops.offset);
   m_device->set_frequency_correction(m_tunerprops.freqcorrection + m_channelprops.freqcorrection);
   m_device->set_sample_rate(m_signalprops.samplerate);
@@ -1283,10 +1286,14 @@ bool channelsettings::OnInit(void)
         m_button_ok->SetLabel(kodi::addon::GetLocalizedString(15019)); // Add
     }
 
-    // Set the channel frequency in XXX.X MHz (FM/HD) or XXX.XXX format (DAB/WX)
+    // Set the channel frequency in kHz for AM HD, otherwise in MHz.
     char freqstr[128];
     double frequency = (m_channelprops.frequency / static_cast<double>(100000)) / 10.0;
-    if ((m_channelprops.modulation == modulation::dab) ||
+    if ((m_channelprops.modulation == modulation::hd) &&
+        hdradio::is_am_frequency(m_channelprops.frequency))
+      snprintf(freqstr, std::extent<decltype(freqstr)>::value, "%u kHz",
+               m_channelprops.frequency / 1000);
+    else if ((m_channelprops.modulation == modulation::dab) ||
         (m_channelprops.modulation == modulation::wx))
       snprintf(freqstr, std::extent<decltype(freqstr)>::value,
                kodi::addon::GetLocalizedString(30337).c_str(), // %.3f MHz

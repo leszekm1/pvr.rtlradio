@@ -98,6 +98,11 @@ usbdevice::usbdevice(uint32_t index)
     result = rtlsdr_set_agc_mode(m_device, 0);
     if (result < 0)
       throw string_exception(__func__, ": failed to set digital automatic gain control to off");
+
+    // A previous rtl_tcp or local session may have left direct sampling on.
+    result = rtlsdr_set_direct_sampling(m_device, 0);
+    if (result < 0)
+      throw string_exception(__func__, ": failed to disable direct sampling");
   }
 
   // Close the RTL-SDR device on any thrown exception
@@ -482,6 +487,21 @@ int usbdevice::set_gain(int db) const
 
   // Return the gain value that was actually used
   return nearest;
+}
+
+//---------------------------------------------------------------------------
+// usbdevice::set_direct_sampling
+
+void usbdevice::set_direct_sampling(int mode) const
+{
+  assert(m_device != nullptr);
+
+  if ((mode < 0) || (mode > 2))
+    throw std::invalid_argument("mode");
+
+  int result = rtlsdr_set_direct_sampling(m_device, mode);
+  if (result < 0)
+    throw string_exception(__func__, ": failed to set direct sampling mode to ", mode);
 }
 
 //---------------------------------------------------------------------------

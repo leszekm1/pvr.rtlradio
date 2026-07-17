@@ -61,13 +61,14 @@ hdmuxscanner::hdmuxscanner(uint32_t samplerate, uint32_t frequency, callback con
   if (samplerate != SAMPLE_RATE)
     throw std::invalid_argument("samplerate");
 
-  assert((frequency >= 87900000) && (frequency <= 107900000));
-  if ((frequency < 87900000) || (frequency > 107900000))
+  assert(hdradio::is_valid_frequency(frequency));
+  if (!hdradio::is_valid_frequency(frequency))
     throw std::invalid_argument("frequency");
 
   // Initialize the HD Radio demodulator
   nrsc5_open_pipe(&m_nrsc5);
-  nrsc5_set_mode(m_nrsc5, NRSC5_MODE_FM);
+  nrsc5_set_mode(m_nrsc5,
+                 hdradio::is_am_frequency(frequency) ? NRSC5_MODE_AM : NRSC5_MODE_FM);
   nrsc5_set_callback(m_nrsc5, nrsc5_callback, this);
 }
 

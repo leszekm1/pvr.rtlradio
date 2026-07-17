@@ -182,9 +182,12 @@ static std::string channel_name_for_storage(struct channelprops const& channelpr
   if (channelprops.modulation == modulation::hd)
   {
     char name[32] = {};
-    snprintf(name, sizeof(name), "%u.%u",
-             channelprops.frequency / 1000000,
-             (channelprops.frequency % 1000000) / 100000);
+    if (hdradio::is_am_frequency(channelprops.frequency))
+      snprintf(name, sizeof(name), "%u", channelprops.frequency / 1000);
+    else
+      snprintf(name, sizeof(name), "%u.%u",
+               channelprops.frequency / 1000000,
+               (channelprops.frequency % 1000000) / 100000);
     return std::string(name);
   }
 
@@ -683,11 +686,14 @@ void enumerate_hdradio_channels(sqlite3* instance,
   //
 
   // frequency | channelnumber | subchannelnumber | name | logourl
-  auto sql = "select channel.frequency as frequency, (((channel.frequency / 100000) - 879) / 2) + "
-             "200 as channelnumber, "
+  auto sql = "select channel.frequency as frequency, "
+             "case when channel.frequency < 2000000 then channel.frequency / 1000 "
+             "else (((channel.frequency / 100000) - 879) / 2) + 200 end as channelnumber, "
              "ifnull(subchannel.number, 0) as subchannelnumber, "
-             "case ?1 when 0 then '' else cast(channel.frequency / 1000000 as text) || '.' || "
-             "cast((channel.frequency % 1000000) / 100000 as text) || ' ' end || "
+             "case ?1 when 0 then '' else "
+             "case when channel.frequency < 2000000 then cast(channel.frequency / 1000 as text) || ' kHz ' "
+             "else cast(channel.frequency / 1000000 as text) || '.' || "
+             "cast((channel.frequency % 1000000) / 100000 as text) || ' ' end end || "
              "  channel.name || iif(subchannel.name is null, '', ' ' || subchannel.name) as name, "
              "ifnull(subchannel.logourl, channel.logourl) as logourl "
              "from channel left outer join subchannel on channel.frequency = subchannel.frequency "

@@ -323,16 +323,47 @@ bool addon::channeladd_hd(struct settings const& settings, struct channelprops& 
 {
   std::vector<struct subchannelprops> subchannelprops; // Existing subchannels
 
-  // Create and initialize the frequency input dialog box
-  std::unique_ptr<channeladd> adddialog = channeladd::create(modulation::hd);
-  adddialog->DoModal();
-
-  // If the dialog was successful add the channel to the database
-  if (adddialog->get_dialog_result())
+  bool am_band = false;
+  if (is_region_northamerica(settings))
   {
+    std::vector<std::string> bands{"AM", "FM"};
+    int const selected_band = kodi::gui::dialogs::Select::Show("Select HD Radio band", bands);
+    if (selected_band < 0)
+      return false;
+    am_band = (selected_band == 0);
+  }
 
-    // Retrieve the new channel properties from the dialog box
+  if (am_band)
+  {
+    std::vector<std::string> labels;
+    std::vector<uint32_t> frequencies;
+    for (uint32_t frequency = hdradio::AM_FIRST_FREQUENCY; frequency <= hdradio::AM_LAST_FREQUENCY;
+         frequency += hdradio::AM_STEP_FREQUENCY)
+    {
+      labels.emplace_back(std::to_string(frequency / 1000) + " kHz");
+      frequencies.emplace_back(frequency);
+    }
+
+    int const selected = kodi::gui::dialogs::Select::Show("Select AM HD Radio frequency", labels);
+    if (selected < 0)
+      return false;
+
+    channelprops.frequency = frequencies[selected];
+    channelprops.modulation = modulation::hd;
+    channelprops.name = kodi::addon::GetLocalizedString(19204, "New channel");
+    channelprops.autogain = false;
+  }
+  else
+  {
+    // Use the existing numeric dialog for FM HD Radio.
+    std::unique_ptr<channeladd> adddialog = channeladd::create(modulation::hd);
+    adddialog->DoModal();
+    if (!adddialog->get_dialog_result())
+      return false;
     adddialog->get_channel_properties(channelprops);
+  }
+
+  {
     assert(channelprops.modulation == modulation::hd);
 
     // For HD Radio, change "New channel" to "New multiplex"
@@ -2693,8 +2724,10 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
 
     enum scan_mode_type
     {
-      scan_mode_hd_full,
-      scan_mode_hd_single,
+      scan_mode_hd_fm_full,
+      scan_mode_hd_fm_single,
+      scan_mode_hd_am_full,
+      scan_mode_hd_am_single,
       scan_mode_fm_rds,
       scan_mode_fm_rds_single,
       scan_mode_wx
@@ -2705,11 +2738,20 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
 
     if (settings.hdradio_enable)
     {
-      scan_types.emplace_back("HD Radio full scan");
-      scan_modes.emplace_back(scan_mode_hd_full);
+      scan_types.emplace_back("FM HD Radio full scan");
+      scan_modes.emplace_back(scan_mode_hd_fm_full);
 
-      scan_types.emplace_back("HD Radio single-frequency scan");
-      scan_modes.emplace_back(scan_mode_hd_single);
+      scan_types.emplace_back("FM HD Radio single-frequency scan");
+      scan_modes.emplace_back(scan_mode_hd_fm_single);
+
+      if (is_region_northamerica(settings))
+      {
+        scan_types.emplace_back("AM HD Radio full scan");
+        scan_modes.emplace_back(scan_mode_hd_am_full);
+
+        scan_types.emplace_back("AM HD Radio single-frequency scan");
+        scan_modes.emplace_back(scan_mode_hd_am_single);
+      }
     }
 
     if (settings.fmradio_enable_rds)
@@ -2751,28 +2793,45 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
 
     bool single_frequency_hd_scan = false;
     uint32_t selected_single_hd_frequency = 0;
+    bool const hd_am_scan = (scan_mode == scan_mode_hd_am_full) ||
+                            (scan_mode == scan_mode_hd_am_single);
 
     bool single_frequency_fm_rds_scan = false;
     uint32_t selected_single_fm_rds_frequency = 0;
 
-    if (scan_mode == scan_mode_hd_single)
+    if ((scan_mode == scan_mode_hd_fm_single) ||
+        (scan_mode == scan_mode_hd_am_single))
     {
       std::vector<std::string> hd_frequency_labels;
       std::vector<uint32_t> hd_frequencies;
 
-      for (uint32_t frequency = 87900000; frequency <= 107900000; frequency += 200000)
+      uint32_t const first_frequency = hd_am_scan ? hdradio::AM_FIRST_FREQUENCY
+                                                  : hdradio::FM_FIRST_FREQUENCY;
+      uint32_t const last_frequency = hd_am_scan ? hdradio::AM_LAST_FREQUENCY
+                                                 : hdradio::FM_LAST_FREQUENCY;
+      uint32_t const step_frequency = hd_am_scan ? hdradio::AM_STEP_FREQUENCY
+                                                 : hdradio::FM_STEP_FREQUENCY;
+
+      for (uint32_t frequency = first_frequency;
+           frequency <= last_frequency;
+           frequency += step_frequency)
       {
         char label[64] = {};
-        snprintf(label, std::extent<decltype(label)>::value, "%u.%u MHz",
-                 frequency / 1000000,
-                 (frequency % 1000000) / 100000);
+        if (hd_am_scan)
+          snprintf(label, std::extent<decltype(label)>::value, "%u kHz", frequency / 1000);
+        else
+          snprintf(label, std::extent<decltype(label)>::value, "%u.%u MHz",
+                   frequency / 1000000,
+                   (frequency % 1000000) / 100000);
 
         hd_frequency_labels.emplace_back(label);
         hd_frequencies.emplace_back(frequency);
       }
 
       int selected_frequency =
-          kodi::gui::dialogs::Select::Show("Select HD Radio frequency", hd_frequency_labels);
+          kodi::gui::dialogs::Select::Show(
+              hd_am_scan ? "Select AM HD Radio frequency" : "Select FM HD Radio frequency",
+              hd_frequency_labels);
       if (selected_frequency < 0)
         return;
 
@@ -3605,16 +3664,24 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
     try
     {
       uint32_t const sample_rate = 1488375;
+      uint32_t const band_first_frequency =
+          hd_am_scan ? hdradio::AM_FIRST_FREQUENCY : hdradio::FM_FIRST_FREQUENCY;
+      uint32_t const band_last_frequency =
+          hd_am_scan ? hdradio::AM_LAST_FREQUENCY : hdradio::FM_LAST_FREQUENCY;
       uint32_t const first_frequency =
-          single_frequency_hd_scan ? selected_single_hd_frequency : 87900000;
+          single_frequency_hd_scan ? selected_single_hd_frequency : band_first_frequency;
       uint32_t const last_frequency =
-          single_frequency_hd_scan ? selected_single_hd_frequency : 107900000;
-      uint32_t const step_frequency = 200000;
+          single_frequency_hd_scan ? selected_single_hd_frequency : band_last_frequency;
+      uint32_t const step_frequency =
+          hd_am_scan ? hdradio::AM_STEP_FREQUENCY : hdradio::FM_STEP_FREQUENCY;
       uint32_t const total_frequencies = ((last_frequency - first_frequency) / step_frequency) + 1;
+      char const* const frequency_unit = hd_am_scan ? " kHz" : " MHz";
 
       // Coarse gains based on your measured Seattle gain JSON:
       // high ~= 197, mid ~= 87, low ~= 27, in tenths of dB.
-      std::vector<int> coarse_gain_targets = {328, 197, 87, 27};
+      std::vector<int> coarse_gain_targets = hd_am_scan
+                                                 ? std::vector<int>{0}
+                                                 : std::vector<int>{328, 197, 87, 27};
 
       auto const coarse_scan_time = std::chrono::seconds(8);
       auto const coarse_minimum_time = std::chrono::seconds(3);
@@ -3631,12 +3698,17 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
       bool canceled = false;
 
       kodi::gui::dialogs::CProgress progress;
-      progress.SetHeading(single_frequency_hd_scan ? "HD Radio single-frequency scan" : "HD Radio scan");
+      progress.SetHeading(
+          hd_am_scan
+              ? (single_frequency_hd_scan ? "AM HD Radio single-frequency scan"
+                                          : "AM HD Radio scan")
+              : (single_frequency_hd_scan ? "FM HD Radio single-frequency scan"
+                                          : "FM HD Radio scan"));
       progress.SetCanCancel(true);
       progress.ShowProgressBar(true);
       progress.SetPercentage(0);
       progress.SetLine(0, "Preparing RTL-SDR tuner...");
-      progress.SetLine(1, "Manual gain scan");
+      progress.SetLine(1, hd_am_scan ? "Q-branch direct sampling" : "Manual gain scan");
       progress.SetLine(2, "Press Cancel to stop");
       progress.Open();
 
@@ -3762,6 +3834,7 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
 
         std::unique_ptr<rtldevice> device = create_device(settings);
 
+        device->set_direct_sampling(hd_am_scan ? 2 : 0);
         device->set_frequency_correction(0);
         device->set_sample_rate(sample_rate);
         device->set_center_frequency(frequency);
@@ -3822,7 +3895,8 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
             log_info(__func__,
                      ": ",
                      freq_label,
-                     " MHz gain=",
+                     frequency_unit,
+                     " gain=",
                      gain,
                      " now has ",
                      current_subchannel_count,
@@ -3887,7 +3961,8 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
             log_info(__func__,
                      ": async reader stopped at ",
                      freq_label,
-                     " MHz gain=",
+                     frequency_unit,
+                     " gain=",
                      gain,
                      ": ",
                      ex.what());
@@ -3916,7 +3991,8 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
         log_info(__func__,
                  ": gain test ",
                  freq_label,
-                 " MHz gain=",
+                 frequency_unit,
+                 " gain=",
                  gain,
                  " sync=",
                  result.sync ? "yes" : "no",
@@ -3941,22 +4017,26 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
            frequency += step_frequency, ++frequency_index)
       {
         char freq_label[64] = {};
-        snprintf(freq_label,
-                 sizeof(freq_label),
-                 "%u.%u",
-                 frequency / 1000000,
-                 (frequency % 1000000) / 100000);
+        if (hd_am_scan)
+          snprintf(freq_label, sizeof(freq_label), "%u", frequency / 1000);
+        else
+          snprintf(freq_label,
+                   sizeof(freq_label),
+                   "%u.%u",
+                   frequency / 1000000,
+                   (frequency % 1000000) / 100000);
 
         int percent = static_cast<int>((frequency_index * 100) / total_frequencies);
 
         if (update_progress(
                 percent,
-                std::string("Scanning ") + freq_label + " MHz HD",
+                std::string("Scanning ") + freq_label + frequency_unit + " HD",
                 std::to_string(muxes_found) +
                     " station(s), " +
                     std::to_string(subchannels_found) +
                     " HD channel(s) found",
-                "Trying high/mid/low manual gain"))
+                hd_am_scan ? "Using Q-branch direct sampling"
+                           : "Trying high/mid/low manual gain"))
         {
           canceled = true;
           break;
@@ -3965,7 +4045,8 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
         log_info(__func__,
                  ": scanning ",
                  freq_label,
-                 " MHz HD with manual gain search");
+                 frequency_unit,
+                 hd_am_scan ? " HD with direct sampling" : " HD with manual gain search");
 
         std::vector<gain_scan_result> coarse_locks;
         gain_scan_result locked = {};
@@ -3994,7 +4075,8 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
             log_info(__func__,
                      ": coarse lock at ",
                      freq_label,
-                     " MHz gain=",
+                     frequency_unit,
+                     " gain=",
                      coarse_gain,
                      " score=",
                      coarse_score,
@@ -4030,7 +4112,8 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
           log_info(__func__,
                    ": no HD lock at ",
                    freq_label,
-                   " MHz using coarse gains high/mid/low");
+                   frequency_unit,
+                   hd_am_scan ? " using direct sampling" : " using coarse gains high/mid/low");
           continue;
         }
 
@@ -4055,13 +4138,17 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
 
         add_fine_window(locked.gain);
 
+        if (hd_am_scan)
+          fine_gains.assign(1, locked.gain);
+
         std::sort(fine_gains.begin(), fine_gains.end());
         fine_gains.erase(std::unique(fine_gains.begin(), fine_gains.end()), fine_gains.end());
 
         log_info(__func__,
                  ": fine tuning ",
                  freq_label,
-                 " MHz using ",
+                 frequency_unit,
+                 " using ",
                  fine_gains.size(),
                  " candidate gain(s) within +/-",
                  fine_gain_window,
@@ -4142,7 +4229,8 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
         log_info(__func__,
                  ": best gain for ",
                  freq_label,
-                 " MHz is ",
+                 frequency_unit,
+                 " is ",
                  best.gain,
                  " score=",
                  best_score,
@@ -4171,7 +4259,8 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
           log_info(__func__,
                    ": lock existed at ",
                    freq_label,
-                   " MHz but final scan found no usable subchannels at gain=",
+                   frequency_unit,
+                   " but final scan found no usable subchannels at gain=",
                    best.gain);
           continue;
         }
@@ -4233,7 +4322,8 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
                  muxname,
                  " at ",
                  freq_label,
-                 " MHz with ",
+                 frequency_unit,
+                 " with ",
                  subchannels.size(),
                  " HD subchannel(s), best_gain=",
                  best.gain,

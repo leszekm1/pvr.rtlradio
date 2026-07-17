@@ -284,6 +284,13 @@ int filedevice::set_gain(int db) const
 }
 
 //---------------------------------------------------------------------------
+// filedevice::set_direct_sampling
+
+void filedevice::set_direct_sampling(int /*mode*/) const
+{
+}
+
+//---------------------------------------------------------------------------
 // filedevice::set_sample_rate
 //
 // Sets the sample rate of the device

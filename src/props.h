@@ -92,6 +92,34 @@ enum class modulation
   wx = 3, // VHF Weather radio
 };
 
+// HD Radio broadcast band limits and helpers. AM and FM HD channels share the
+// existing modulation identifier so database and Kodi channel IDs remain
+// backward-compatible; the center frequency selects the NRSC-5 mode.
+namespace hdradio
+{
+constexpr uint32_t AM_FIRST_FREQUENCY = 530000;
+constexpr uint32_t AM_LAST_FREQUENCY = 1700000;
+constexpr uint32_t AM_STEP_FREQUENCY = 10000;
+constexpr uint32_t FM_FIRST_FREQUENCY = 87900000;
+constexpr uint32_t FM_LAST_FREQUENCY = 107900000;
+constexpr uint32_t FM_STEP_FREQUENCY = 200000;
+
+inline bool is_am_frequency(uint32_t frequency)
+{
+  return (frequency >= AM_FIRST_FREQUENCY) && (frequency <= AM_LAST_FREQUENCY);
+}
+
+inline bool is_fm_frequency(uint32_t frequency)
+{
+  return (frequency >= FM_FIRST_FREQUENCY) && (frequency <= FM_LAST_FREQUENCY);
+}
+
+inline bool is_valid_frequency(uint32_t frequency)
+{
+  return is_am_frequency(frequency) || is_fm_frequency(frequency);
+}
+} // namespace hdradio
+
 // regioncode
 //
 // Defines the possible region codes

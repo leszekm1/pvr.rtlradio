@@ -101,6 +101,11 @@ public:
   // Sets the gain value of the device
   virtual int set_gain(int db) const = 0;
 
+  // set_direct_sampling
+  //
+  // Selects the RTL2832 direct-sampling input (0=off, 1=I, 2=Q)
+  virtual void set_direct_sampling(int mode) const = 0;
+
   // set_sample_rate
   //
   // Sets the sample rate of the device
