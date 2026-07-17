@@ -32,5 +32,5 @@ addon() {
         "${ADDON_BUILD}/${PKG_ADDON_ID}/lib"
 
   patchelf --add-rpath '${ORIGIN}/lib' \
-    "${ADDON_BUILD}/${PKG_ADDON_ID}/pvr.rtlradio.so.21.0.0"
+    "${ADDON_BUILD}/${PKG_ADDON_ID}"/pvr.rtlradio.so.*
 }
