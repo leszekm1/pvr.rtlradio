@@ -660,6 +660,53 @@ void enumerate_fmradio_channels(sqlite3* instance,
 }
 
 //---------------------------------------------------------------------------
+// enumerate_amradio_channels
+
+void enumerate_amradio_channels(sqlite3* instance,
+                                bool prependnumber,
+                                enumerate_channels_callback const& callback)
+{
+  sqlite3_stmt* statement = nullptr;
+  char const* sql =
+      "select frequency, frequency / 1000 as channelnumber, "
+      "case ?1 when 0 then name else cast(frequency / 1000 as text) || ' kHz ' || name end, "
+      "logourl from channel where modulation = 4 order by frequency";
+
+  if (instance == nullptr)
+    throw std::invalid_argument("instance");
+
+  int result = sqlite3_prepare_v2(instance, sql, -1, &statement, nullptr);
+  if (result != SQLITE_OK)
+    throw sqlite_exception(result, sqlite3_errmsg(instance));
+
+  try
+  {
+    result = sqlite3_bind_int(statement, 1, prependnumber ? 1 : 0);
+    if (result != SQLITE_OK)
+      throw sqlite_exception(result);
+
+    while (sqlite3_step(statement) == SQLITE_ROW)
+    {
+      struct channel item = {};
+      channelid id(sqlite3_column_int(statement, 0), modulation::am);
+      item.id = id.id();
+      item.channel = sqlite3_column_int(statement, 1);
+      item.subchannel = 0;
+      item.name = reinterpret_cast<char const*>(sqlite3_column_text(statement, 2));
+      item.logourl = reinterpret_cast<char const*>(sqlite3_column_text(statement, 3));
+      callback(item);
+    }
+
+    sqlite3_finalize(statement);
+  }
+  catch (...)
+  {
+    sqlite3_finalize(statement);
+    throw;
+  }
+}
+
+//---------------------------------------------------------------------------
 // enumerate_hdradio_channels
 //
 // Enumerates HD Radio channels
@@ -1137,6 +1184,8 @@ std::string export_channels(sqlite3* instance)
         return "DAB";
       case modulation::hd:
         return "HD";
+      case modulation::am:
+        return "AM";
       default:
         return "";
     }
@@ -1511,6 +1560,8 @@ void import_channels(sqlite3* instance, char const* json)
                 when 'WX' then 3
                 when 'WEATHER' then 3
                 when 'WEATHERRADIO' then 3
+                when 'AM' then 4
+                when 'AMRADIO' then 4
                 else 0
             end as modulation,
 
@@ -1553,6 +1604,8 @@ void import_channels(sqlite3* instance, char const* json)
                 when 'WX' then 3
                 when 'WEATHER' then 3
                 when 'WEATHERRADIO' then 3
+                when 'AM' then 4
+                when 'AMRADIO' then 4
                 else 0
             end as modulation,
 
@@ -1583,6 +1636,8 @@ void import_channels(sqlite3* instance, char const* json)
                 when 'WX' then 3
                 when 'WEATHER' then 3
                 when 'WEATHERRADIO' then 3
+                when 'AM' then 4
+                when 'AMRADIO' then 4
                 else 0
             end as modulation,
 

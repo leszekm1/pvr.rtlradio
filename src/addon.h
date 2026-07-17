@@ -242,6 +242,7 @@ private:
   // Channel Add Helpers
   //
   bool channeladd_dab(struct settings const& settings, struct channelprops& channelprops) const;
+  bool channeladd_am(struct settings const& settings, struct channelprops& channelprops) const;
   bool channeladd_fm(struct settings const& settings, struct channelprops& channelprops) const;
   bool channeladd_hd(struct settings const& settings, struct channelprops& channelprops) const;
   bool channeladd_wx(struct settings const& settings, struct channelprops& channelprops) const;

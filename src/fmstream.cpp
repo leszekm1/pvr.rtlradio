@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <memory.h>
 #include <cstdio>
 #include <mutex>
@@ -58,7 +59,8 @@ namespace
   void pvr_rtlradio_fm_publish_nowplaying(std::string title,
                                           std::string artist,
                                           std::string album,
-                                          std::string station)
+                                          std::string station,
+                                          std::string radio_kind = "FM Radio")
   {
     static std::mutex lock;
     static std::string last_state;
@@ -108,7 +110,7 @@ namespace
       std::fprintf(statefp, "artcache_key=\n");
       std::fprintf(statefp, "station_key=\n");
       std::fprintf(statefp, "station_name=%s\n", station.c_str());
-      std::fprintf(statefp, "station_slogan=FM Radio\n");
+      std::fprintf(statefp, "station_slogan=%s\n", radio_kind.c_str());
       std::fprintf(statefp, "title=%s\n", title.c_str());
       std::fprintf(statefp, "artist=%s\n", artist.c_str());
       std::fprintf(statefp, "album=%s\n", album.c_str());
@@ -157,7 +159,8 @@ fmstream::fmstream(std::unique_ptr<rtldevice> device,
                    struct channelprops const& channelprops,
                    struct fmprops const& fmprops)
   : m_device(std::move(device)),
-    m_decoderds(fmprops.decoderds),
+    m_isam(channelprops.modulation == modulation::am),
+    m_decoderds((channelprops.modulation == modulation::fm) && fmprops.decoderds),
     m_rdsdecoder(fmprops.isnorthamerica),
     m_muxname(generate_mux_name(channelprops)),
     m_pcmsamplerate(fmprops.outputrate),
@@ -175,24 +178,25 @@ fmstream::fmstream(std::unique_ptr<rtldevice> device,
 
   // Initialize the RTL-SDR device instance
   m_device->set_frequency_correction(tunerprops.freqcorrection + channelprops.freqcorrection);
+  m_device->set_direct_sampling(m_isam ? 2 : 0);
   uint32_t samplerate = m_device->set_sample_rate(fmprops.samplerate);
-  uint32_t frequency =
-      m_device->set_center_frequency(channelprops.frequency + (samplerate / 4)); // DC offset
+  uint32_t frequency = m_device->set_center_frequency(
+      m_isam ? channelprops.frequency : channelprops.frequency + (samplerate / 4));
 
   // Initialize the demodulator parameters
   //
   tDemodInfo demodinfo = {};
-  demodinfo.HiCutmax = 100000;
-  demodinfo.HiCut = 100000;
-  demodinfo.LowCut = -100000;
+  demodinfo.HiCutmax = m_isam ? 10000 : 100000;
+  demodinfo.HiCut = m_isam ? 5000 : 100000;
+  demodinfo.LowCut = m_isam ? -5000 : -100000;
   demodinfo.SquelchValue = -160;
   demodinfo.WfmDownsampleQuality = static_cast<enum DownsampleQuality>(fmprops.downsamplequality);
 
-  // Initialize the wideband FM demodulator
+  // Initialize the analog AM or wideband FM demodulator
   m_demodulator = std::unique_ptr<CDemodulator>(new CDemodulator());
   m_demodulator->SetUSFmVersion(fmprops.isnorthamerica);
   m_demodulator->SetInputSampleRate(static_cast<TYPEREAL>(samplerate));
-  m_demodulator->SetDemod(DEMOD_WFM, demodinfo);
+  m_demodulator->SetDemod(m_isam ? DEMOD_AM : DEMOD_WFM, demodinfo);
   m_demodulator->SetDemodFreq(static_cast<TYPEREAL>(frequency - channelprops.frequency));
 
   // Initialize the output resampler
@@ -209,8 +213,9 @@ fmstream::fmstream(std::unique_ptr<rtldevice> device,
   // The HD Radio skin overlay reads the shared nowplaying sidecar file.
   // Clear/replace it for FM immediately so a prior HD station does not remain on screen.
   {
+    std::string const radio_kind = m_isam ? "AM Radio" : "FM Radio";
     std::string fm_title = channelprops.name.empty() ? m_muxname : channelprops.name;
-    pvr_rtlradio_fm_publish_nowplaying(fm_title, "", "FM Radio", fm_title);
+    pvr_rtlradio_fm_publish_nowplaying(fm_title, "", radio_kind, fm_title, radio_kind);
   }
 
   // Create a worker thread on which to perform the transfer operations
@@ -382,13 +387,17 @@ DEMUX_PACKET* fmstream::demuxread(std::function<DEMUX_PACKET*(int)> const& alloc
                                                 samples.get());
 
   // Process any RDS group data that was collected during demodulation
-  tRDS_GROUPS rdsgroup = {};
-  while (m_demodulator->GetNextRdsGroupData(&rdsgroup))
-    m_rdsdecoder.decode_rdsgroup(rdsgroup);
+  if (!m_isam)
+  {
+    tRDS_GROUPS rdsgroup = {};
+    while (m_demodulator->GetNextRdsGroupData(&rdsgroup))
+      m_rdsdecoder.decode_rdsgroup(rdsgroup);
+  }
 
   // FM_RDS_SIDECAR_LIVE_RDS_UPDATE
   //
   // Publish live FM RDS/RBDS text to the same sidecar path the skin uses for HD.
+  if (!m_isam)
   {
     std::string station = m_muxname;
     std::string title;
@@ -414,15 +423,18 @@ DEMUX_PACKET* fmstream::demuxread(std::function<DEMUX_PACKET*(int)> const& alloc
       pvr_rtlradio_fm_publish_nowplaying(title, "", album, station);
   }
 
-  // Determine the size of the demultiplexer packet data and allocate it
-  int packetsize = audiopackets * sizeof(TYPESTEREO16);
+  // Upsampling AM can produce more output frames than input frames. Allocate
+  // for the maximum number the fractional resampler can emit.
+  TYPEREAL const resample_rate = m_demodulator->GetOutputRate() / m_pcmsamplerate;
+  int const packetframes = static_cast<int>(std::ceil(audiopackets / resample_rate)) + 1;
+  int packetsize = packetframes * sizeof(TYPESTEREO16);
   DEMUX_PACKET* packet = allocator(packetsize);
   if (packet == nullptr)
     return nullptr;
 
   // Resample the audio data directly into the allocated packet buffer
   audiopackets = m_resampler->Resample(
-      audiopackets, (m_demodulator->GetOutputRate() / m_pcmsamplerate), samples.get(),
+      audiopackets, resample_rate, samples.get(),
       reinterpret_cast<TYPESTEREO16*>(packet->pData), m_pcmgain);
 
   // Calculate the proper duration for the packet
@@ -511,6 +523,9 @@ void fmstream::enumproperties(std::function<void(struct streamprops const& props
 
 std::string fmstream::generate_mux_name(struct channelprops const& channelprops) const
 {
+  if (channelprops.modulation == modulation::am)
+    return std::to_string(channelprops.frequency / 1000) + " kHz AM";
+
   // Set the default mux name to the frequency in Megahertz
   char buf[64] = {0};
   snprintf(buf, std::extent<decltype(buf)>::value, "%.1f FM",
@@ -543,6 +558,9 @@ long long fmstream::length(void) const
 
 std::string fmstream::muxname(void) const
 {
+  if (m_isam)
+    return m_muxname;
+
   // Prefer a decoded RBDS call sign, then RDS Program Service, then frequency.
   if (m_rdsdecoder.has_rbds_callsign())
     return m_rdsdecoder.get_rbds_callsign();
@@ -622,6 +640,9 @@ long long fmstream::seek(long long /*position*/, int /*whence*/)
 
 std::string fmstream::servicename(void) const
 {
+  if (m_isam)
+    return std::string("Analog AM radio");
+
   // Put live RadioText into Kodi's signal-status ServiceName field.
   if (m_rdsdecoder.has_radiotext())
     return m_rdsdecoder.get_radiotext();
@@ -650,6 +671,13 @@ void fmstream::signalquality(int& quality, int& snr) const
   TYPEREAL demodsnr = 0;
 
   m_demodulator->GetSignalLevels(demodquality, demodsnr);
+
+  if (m_isam)
+  {
+    quality = std::max(0, std::min(100, static_cast<int>(100.0 * demodquality)));
+    snr = std::max(0, std::min(100, static_cast<int>(100.0 * demodsnr)));
+    return;
+  }
 
   // For wideband FM, adjust the range such that 80% is nominal for
   // signal quality and 60% is nominal for signal-to-noise; this

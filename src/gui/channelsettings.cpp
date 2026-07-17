@@ -725,6 +725,17 @@ channelsettings::channelsettings(std::unique_ptr<rtldevice> device,
     m_signalprops.offset = (m_signalprops.samplerate / 4);
   }
 
+  // Analog AM
+  //
+  else if (channelprops.modulation == modulation::am)
+  {
+    m_signalprops.samplerate = 1600 KHz;
+    m_signalprops.bandwidth = 20 KHz;
+    m_signalprops.lowcut = -5 KHz;
+    m_signalprops.highcut = 5 KHz;
+    m_signalprops.offset = 0;
+  }
+
   // HD Radio
   //
   else if (channelprops.modulation == modulation::hd)
@@ -772,8 +783,9 @@ channelsettings::channelsettings(std::unique_ptr<rtldevice> device,
 
   // Set the device to match the channel properties at time of construction (prior to OnCreate)
   m_device->set_direct_sampling(
-      (m_channelprops.modulation == modulation::hd &&
-       hdradio::is_am_frequency(m_channelprops.frequency)) ? 2 : 0);
+      ((m_channelprops.modulation == modulation::hd &&
+        hdradio::is_am_frequency(m_channelprops.frequency)) ||
+       m_channelprops.modulation == modulation::am) ? 2 : 0);
   m_device->set_center_frequency(m_channelprops.frequency + m_signalprops.offset);
   m_device->set_frequency_correction(m_tunerprops.freqcorrection + m_channelprops.freqcorrection);
   m_device->set_sample_rate(m_signalprops.samplerate);
@@ -1289,8 +1301,9 @@ bool channelsettings::OnInit(void)
     // Set the channel frequency in kHz for AM HD, otherwise in MHz.
     char freqstr[128];
     double frequency = (m_channelprops.frequency / static_cast<double>(100000)) / 10.0;
-    if ((m_channelprops.modulation == modulation::hd) &&
-        hdradio::is_am_frequency(m_channelprops.frequency))
+    if (((m_channelprops.modulation == modulation::hd) &&
+         hdradio::is_am_frequency(m_channelprops.frequency)) ||
+        (m_channelprops.modulation == modulation::am))
       snprintf(freqstr, std::extent<decltype(freqstr)>::value, "%u kHz",
                m_channelprops.frequency / 1000);
     else if ((m_channelprops.modulation == modulation::dab) ||
@@ -1322,6 +1335,8 @@ bool channelsettings::OnInit(void)
       m_edit_modulation->SetText(kodi::addon::GetLocalizedString(30306));
     else if (m_channelprops.modulation == modulation::wx)
       m_edit_modulation->SetText(kodi::addon::GetLocalizedString(30307));
+    else if (m_channelprops.modulation == modulation::am)
+      m_edit_modulation->SetText(kodi::addon::GetLocalizedString(30340));
 
     // Change the text of the Name edit for multiplex/ensemble channels (HD/DAB)
     if (m_channelprops.modulation == modulation::hd)

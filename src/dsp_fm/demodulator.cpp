@@ -54,6 +54,7 @@ CDemodulator::CDemodulator()
 	m_DemodMode = -1;
 	m_pFmDemod = NULL;
 	m_pWFmDemod = NULL;
+	m_pAmDemod = NULL;
 	m_USFm = true;
 	SetDemodFreq(0.0);
 }
@@ -62,9 +63,9 @@ CDemodulator::~CDemodulator()
 {
 	DeleteAllDemods();
 	if(m_pDemodInBuf)
-		delete m_pDemodInBuf;
+		delete[] m_pDemodInBuf;
 	if(m_pDemodTmpBuf)
-		delete m_pDemodTmpBuf;
+		delete[] m_pDemodTmpBuf;
 }
 
 //////////////////////////////////////////////////////////////////
@@ -76,8 +77,11 @@ void CDemodulator::DeleteAllDemods()
 		delete m_pFmDemod;
 	if(m_pWFmDemod)
 		delete m_pWFmDemod;
+	if(m_pAmDemod)
+		delete m_pAmDemod;
 	m_pFmDemod = NULL;
 	m_pWFmDemod = NULL;
+	m_pAmDemod = NULL;
 }
 
 //////////////////////////////////////////////////////////////////
@@ -92,10 +96,13 @@ void CDemodulator::SetInputSampleRate(TYPEREAL InputRate)
 		switch(m_DemodMode)
 		{
 			case DEMOD_FM:
+			case DEMOD_AM:
 				m_DownConverterOutputRate = m_DownConvert.SetDataRate(m_InputRate, m_DesiredMaxOutputBandwidth);
 				m_DemodOutputRate = m_DownConverterOutputRate;
 				if(m_pFmDemod)
 					m_pFmDemod->SetSampleRate(m_DownConverterOutputRate);
+				if(m_pAmDemod)
+					m_pAmDemod->SetSampleRate(m_DownConverterOutputRate);
 				break;
 			case DEMOD_WFM:
 				m_DownConverterOutputRate = m_DownConvert.SetWfmDataRate(m_InputRate, 100000);
@@ -137,6 +144,11 @@ void CDemodulator::SetDemod(int Mode, tDemodInfo CurrentDemodInfo)
 				m_DownConverterOutputRate = m_DownConvert.SetWfmDataRate(m_InputRate, 100000);
 				m_pWFmDemod = new CWFmDemod(m_DownConverterOutputRate);
 				m_DemodOutputRate = m_pWFmDemod->GetDemodRate();
+				break;
+			case DEMOD_AM:
+				m_DownConverterOutputRate = m_DownConvert.SetDataRate(m_InputRate, m_DesiredMaxOutputBandwidth);
+				m_pAmDemod = new CAmDemod(m_DownConverterOutputRate);
+				m_DemodOutputRate = m_DownConverterOutputRate;
 				break;
 		}
 	}
@@ -191,6 +203,9 @@ int ret = 0;
 				case DEMOD_WFM:
 					n = m_pWFmDemod->ProcessData(n, m_pDemodInBuf, pOutData );
 					break;
+				case DEMOD_AM:
+					n = m_pAmDemod->ProcessData(n, m_pDemodTmpBuf, pOutData );
+					break;
 			}
 			m_InBufPos = 0;
 			ret += n;
@@ -238,6 +253,9 @@ int ret = 0;
 					break;
 				case DEMOD_WFM:
 					n = m_pWFmDemod->ProcessData(n, m_pDemodInBuf, pOutData );
+					break;
+				case DEMOD_AM:
+					n = m_pAmDemod->ProcessData(n, m_pDemodTmpBuf, pOutData );
 					break;
 			}
 

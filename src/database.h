@@ -189,6 +189,13 @@ void enumerate_fmradio_channels(sqlite3* instance,
                                 bool prependnumber,
                                 enumerate_channels_callback const& callback);
 
+// enumerate_amradio_channels
+//
+// Enumerates analog AM Radio channels
+void enumerate_amradio_channels(sqlite3* instance,
+                                bool prependnumber,
+                                enumerate_channels_callback const& callback);
+
 // enumerate_hdradio_channels
 //
 // Enumerates HD Radio channels

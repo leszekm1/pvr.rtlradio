@@ -1,4 +1,5 @@
-set(SOURCES demodulator.cpp
+set(SOURCES amdemod.cpp
+            demodulator.cpp
             downconvert.cpp
             fastfir.cpp
             fft.cpp
@@ -8,7 +9,8 @@ set(SOURCES demodulator.cpp
             iir.cpp
             wfmdemod.cpp)
 
-set(HEADERS datatypes.h
+set(HEADERS amdemod.h
+            datatypes.h
             demodulator.h
             downconvert.h
             fastfir.h

@@ -37,6 +37,7 @@
 #define DEMODULATOR_H
 
 #include "downconvert.h"
+#include "amdemod.h"
 #include "fastfir.h"
 #include "fft.h"
 #include "fmdemod.h"
@@ -47,6 +48,7 @@
 
 #define DEMOD_FM 2
 #define DEMOD_WFM 7
+#define DEMOD_AM 8
 
 #define MAX_INBUFSIZE 250000	//maximum size of demod input buffer
 								//pick so that worst case decimation leaves
@@ -123,6 +125,7 @@ private:
 	//pointers to all the various implemented demodulator classes
 	CFmDemod* m_pFmDemod;
 	CWFmDemod* m_pWFmDemod;
+	CAmDemod* m_pAmDemod;
 
 	// Signal quality calculations
 	void MeasureSignalQuality(int n, TYPECPX* pInData);

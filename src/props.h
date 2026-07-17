@@ -90,7 +90,21 @@ enum class modulation
   hd = 1, // Hybrid Digital radio
   dab = 2, // Digital Audio Broadcast radio
   wx = 3, // VHF Weather radio
+  am = 4, // Medium-wave amplitude modulation radio
 };
+
+namespace amradio
+{
+constexpr uint32_t FIRST_FREQUENCY = 530000;
+constexpr uint32_t LAST_FREQUENCY = 1700000;
+constexpr uint32_t STEP_FREQUENCY = 10000;
+
+inline bool is_valid_frequency(uint32_t frequency)
+{
+  return (frequency >= FIRST_FREQUENCY) && (frequency <= LAST_FREQUENCY) &&
+         (((frequency - FIRST_FREQUENCY) % STEP_FREQUENCY) == 0);
+}
+} // namespace amradio
 
 // HD Radio broadcast band limits and helpers. AM and FM HD channels share the
 // existing modulation identifier so database and Kodi channel IDs remain

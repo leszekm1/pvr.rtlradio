@@ -274,6 +274,10 @@ msgctxt "#30309"
 msgid "Ensemble name"
 msgstr ""
 
+msgctxt "#30340"
+msgid "Amplitude Modulation (AM)"
+msgstr ""
+
 msgctxt "#30310"
 msgid "Multiplex logo"
 msgstr ""
@@ -468,6 +472,14 @@ msgstr ""
 
 msgctxt "#30418"
 msgid "Select DAB ensemble"
+msgstr ""
+
+msgctxt "#30419"
+msgid "AM channels"
+msgstr ""
+
+msgctxt "#30420"
+msgid "AM channel"
 msgstr ""
 
 #

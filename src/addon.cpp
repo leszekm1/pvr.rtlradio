@@ -249,6 +249,53 @@ bool addon::channeladd_dab(struct settings const& settings, struct channelprops&
 }
 
 //---------------------------------------------------------------------------
+// addon::channeladd_am (private)
+//
+// Performs the channel add operation for analog AM Radio
+
+bool addon::channeladd_am(struct settings const& settings, struct channelprops& channelprops) const
+{
+  std::vector<std::string> labels;
+  for (uint32_t frequency = amradio::FIRST_FREQUENCY;
+       frequency <= amradio::LAST_FREQUENCY;
+       frequency += amradio::STEP_FREQUENCY)
+    labels.emplace_back(std::to_string(frequency / 1000) + " kHz");
+
+  int const selected = kodi::gui::dialogs::Select::Show("Select AM Radio frequency", labels);
+  if (selected < 0)
+    return false;
+
+  channelprops = {};
+  channelprops.frequency = amradio::FIRST_FREQUENCY +
+                           static_cast<uint32_t>(selected) * amradio::STEP_FREQUENCY;
+  channelprops.modulation = modulation::am;
+  channelprops.name = "New AM channel";
+  channelprops.autogain = false;
+
+  connectionpool::handle dbhandle(m_connpool);
+  bool const exists = channel_exists(dbhandle, channelprops);
+  if (exists)
+    get_channel_properties(dbhandle, channelprops.frequency, channelprops.modulation, channelprops);
+
+  struct tunerprops tunerprops = {};
+  tunerprops.freqcorrection = settings.device_frequency_correction;
+
+  std::unique_ptr<channelsettings> settingsdialog =
+      channelsettings::create(create_device(settings), tunerprops, channelprops, true);
+  settingsdialog->DoModal();
+  if (!settingsdialog->get_dialog_result())
+    return true;
+
+  settingsdialog->get_channel_properties(channelprops);
+  if (!exists)
+    add_channel(dbhandle, channelprops);
+  else
+    update_channel(dbhandle, channelprops);
+
+  return true;
+}
+
+//---------------------------------------------------------------------------
 // addon::channeladd_fm (private)
 //
 // Performs the channel add operation for FM Radio
@@ -2140,7 +2187,7 @@ PVR_ERROR addon::GetChannelGroupsAmount(int& amount)
   // Create a copy of the current addon settings structure
   struct settings settings = copy_settings();
 
-  amount = 1; // FM Radio is always enabled
+  amount = 2; // Analog AM and FM Radio are always enabled
   amount += settings.hdradio_enable; // HD Radio
   amount += settings.dabradio_enable; // DAB
   amount += settings.wxradio_enable; // Weather Radio
@@ -2173,6 +2220,10 @@ PVR_ERROR addon::GetChannelGroupMembers(kodi::addon::PVRChannelGroup const& grou
 
   if (group.GetGroupName() == kodi::addon::GetLocalizedString(30408))
     enumerator = std::bind(enumerate_fmradio_channels, std::placeholders::_1,
+                           settings.fmradio_prepend_channel_numbers, std::placeholders::_2);
+
+  else if (group.GetGroupName() == kodi::addon::GetLocalizedString(30419))
+    enumerator = std::bind(enumerate_amradio_channels, std::placeholders::_1,
                            settings.fmradio_prepend_channel_numbers, std::placeholders::_2);
 
   else if (settings.hdradio_enable &&
@@ -2246,6 +2297,11 @@ PVR_ERROR addon::GetChannelGroups(bool radio, kodi::addon::PVRChannelGroupsResul
   fmradio.SetIsRadio(true);
   results.Add(fmradio);
 
+  kodi::addon::PVRChannelGroup amradio; // Analog AM Radio
+  amradio.SetGroupName(kodi::addon::GetLocalizedString(30419));
+  amradio.SetIsRadio(true);
+  results.Add(amradio);
+
   if (settings.hdradio_enable)
   {
     kodi::addon::PVRChannelGroup hdradio; // HD Radio
@@ -2313,6 +2369,7 @@ PVR_ERROR addon::GetChannels(bool radio, kodi::addon::PVRChannelsResultSet& resu
 
     connectionpool::handle dbhandle(m_connpool);
     enumerate_fmradio_channels(dbhandle, settings.fmradio_prepend_channel_numbers, callback);
+    enumerate_amradio_channels(dbhandle, settings.fmradio_prepend_channel_numbers, callback);
     if (settings.hdradio_enable)
       enumerate_hdradio_channels(dbhandle, settings.hdradio_prepend_channel_numbers, callback);
     if (settings.dabradio_enable)
@@ -2586,6 +2643,9 @@ PVR_ERROR addon::OpenDialogChannelAdd(kodi::addon::PVRChannel const& /*channel*/
   channeltypes.emplace_back(kodi::addon::GetLocalizedString(30414));
   modulationtypes.emplace_back(modulation::fm);
 
+  channeltypes.emplace_back(kodi::addon::GetLocalizedString(30420));
+  modulationtypes.emplace_back(modulation::am);
+
   if (settings.hdradio_enable)
   {
 
@@ -2648,6 +2708,8 @@ PVR_ERROR addon::OpenDialogChannelAdd(kodi::addon::PVRChannel const& /*channel*/
 
     if (modulationtype == modulation::fm)
       result = channeladd_fm(settings, channelprops);
+    else if (modulationtype == modulation::am)
+      result = channeladd_am(settings, channelprops);
     else if (modulationtype == modulation::hd)
       result = channeladd_hd(settings, channelprops);
     else if (modulationtype == modulation::dab)
@@ -2728,6 +2790,8 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
       scan_mode_hd_fm_single,
       scan_mode_hd_am_full,
       scan_mode_hd_am_single,
+      scan_mode_am_full,
+      scan_mode_am_single,
       scan_mode_fm_rds,
       scan_mode_fm_rds_single,
       scan_mode_wx
@@ -2763,6 +2827,15 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
       scan_modes.emplace_back(scan_mode_fm_rds_single);
     }
 
+    if (is_region_northamerica(settings))
+    {
+      scan_types.emplace_back("AM Radio full scan");
+      scan_modes.emplace_back(scan_mode_am_full);
+
+      scan_types.emplace_back("AM Radio single-frequency scan");
+      scan_modes.emplace_back(scan_mode_am_single);
+    }
+
     if (settings.wxradio_enable)
     {
       scan_types.emplace_back("Weather Radio scan");
@@ -2788,8 +2861,11 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
       scan_mode = scan_modes[selected];
     }
 
-    enum modulation scan_modulation =
-        (scan_mode == scan_mode_wx) ? modulation::wx : modulation::hd;
+    enum modulation scan_modulation = modulation::hd;
+    if (scan_mode == scan_mode_wx)
+      scan_modulation = modulation::wx;
+    else if ((scan_mode == scan_mode_am_full) || (scan_mode == scan_mode_am_single))
+      scan_modulation = modulation::am;
 
     bool single_frequency_hd_scan = false;
     uint32_t selected_single_hd_frequency = 0;
@@ -2798,6 +2874,25 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
 
     bool single_frequency_fm_rds_scan = false;
     uint32_t selected_single_fm_rds_frequency = 0;
+    bool const single_frequency_am_scan = (scan_mode == scan_mode_am_single);
+    uint32_t selected_single_am_frequency = 0;
+
+    if (single_frequency_am_scan)
+    {
+      std::vector<std::string> labels;
+      for (uint32_t frequency = amradio::FIRST_FREQUENCY;
+           frequency <= amradio::LAST_FREQUENCY;
+           frequency += amradio::STEP_FREQUENCY)
+        labels.emplace_back(std::to_string(frequency / 1000) + " kHz");
+
+      int const selected =
+          kodi::gui::dialogs::Select::Show("Select AM Radio frequency", labels);
+      if (selected < 0)
+        return;
+
+      selected_single_am_frequency = amradio::FIRST_FREQUENCY +
+          static_cast<uint32_t>(selected) * amradio::STEP_FREQUENCY;
+    }
 
     if ((scan_mode == scan_mode_hd_fm_single) ||
         (scan_mode == scan_mode_hd_am_single))
@@ -3319,6 +3414,210 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
       return;
     }
     // FM_RDS_SCAN_BRANCH_END
+
+    if (scan_modulation == modulation::am)
+    {
+      struct am_scan_measurement
+      {
+        int gain = 0;
+        float power = -999.0f;
+        float snr = -999.0f;
+        int reports = 0;
+        bool overload = false;
+        bool detected = false;
+      };
+
+      std::vector<int> valid_gains;
+      {
+        std::unique_ptr<rtldevice> gain_device = create_device(settings);
+        gain_device->get_valid_gains(valid_gains);
+      }
+      if (valid_gains.empty())
+        valid_gains = {0, 27, 77, 125, 197, 280, 328, 386, 439, 496};
+
+      auto nearest_gain = [&](int desired) -> int
+      {
+        return *std::min_element(valid_gains.begin(), valid_gains.end(),
+                                 [&](int left, int right)
+        {
+          return std::abs(left - desired) < std::abs(right - desired);
+        });
+      };
+
+      std::vector<int> coarse_gains;
+      for (int desired : {27, 197, 328, 439})
+      {
+        int const gain = nearest_gain(desired);
+        if (std::find(coarse_gains.begin(), coarse_gains.end(), gain) == coarse_gains.end())
+          coarse_gains.emplace_back(gain);
+      }
+
+      auto measure_am = [&](uint32_t frequency, int gain) -> am_scan_measurement
+      {
+        am_scan_measurement measurement;
+        measurement.gain = gain;
+
+        struct signalprops signalprops = {};
+        signalprops.filter = false;
+        signalprops.samplerate = 1600000;
+        signalprops.bandwidth = 20000;
+        // Put the carrier away from the RTL-SDR center/DC spike.
+        signalprops.offset = 20000;
+        signalprops.lowcut = -5000;
+        signalprops.highcut = 5000;
+
+        struct signalplotprops plotprops = {};
+        plotprops.height = 200;
+        plotprops.width = 512;
+        plotprops.mindb = -72.0f;
+        plotprops.maxdb = 4.0f;
+
+        std::mutex status_mutex;
+        std::unique_ptr<signalmeter> meter = signalmeter::create(
+            signalprops, plotprops, 100,
+            [&](struct signalmeter::signal_status const& status) -> void
+        {
+          std::lock_guard<std::mutex> status_lock(status_mutex);
+          measurement.reports++;
+          measurement.overload = measurement.overload || status.overload;
+          if (!std::isnan(status.power) && status.power > measurement.power)
+            measurement.power = status.power;
+          if (!std::isnan(status.snr) && status.snr > measurement.snr)
+            measurement.snr = status.snr;
+        });
+
+        std::unique_ptr<rtldevice> device = create_device(settings);
+        device->set_direct_sampling(2);
+        device->set_center_frequency(frequency + signalprops.offset);
+        device->set_frequency_correction(settings.device_frequency_correction);
+        device->set_sample_rate(signalprops.samplerate);
+        device->set_automatic_gain_control(false);
+        device->set_gain(gain);
+        device->begin_stream();
+
+        size_t const buffer_size = 32 KiB;
+        std::unique_ptr<uint8_t[]> buffer(new uint8_t[buffer_size]);
+        auto const deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(700);
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+          size_t const count = device->read(buffer.get(), buffer_size);
+          if (count > 0)
+            meter->inputsamples(buffer.get(), count);
+        }
+
+        measurement.detected = measurement.reports >= 2 &&
+                               measurement.snr >= 6.0f &&
+                               measurement.power > -65.0f &&
+                               !measurement.overload;
+        return measurement;
+      };
+
+      uint32_t const first_frequency = single_frequency_am_scan
+          ? selected_single_am_frequency : amradio::FIRST_FREQUENCY;
+      uint32_t const last_frequency = single_frequency_am_scan
+          ? selected_single_am_frequency : amradio::LAST_FREQUENCY;
+      size_t const frequency_count =
+          ((last_frequency - first_frequency) / amradio::STEP_FREQUENCY) + 1;
+
+      kodi::gui::dialogs::CProgress progress;
+      progress.SetHeading(single_frequency_am_scan
+                              ? "AM Radio single-frequency scan" : "AM Radio scan");
+      progress.SetCanCancel(true);
+      progress.ShowProgressBar(true);
+      progress.SetLine(1, "Q-branch direct sampling; four-gain search");
+      progress.SetLine(2, "Press Cancel to stop");
+      progress.Open();
+
+      int channels_found = 0;
+      bool canceled = false;
+      size_t frequency_index = 0;
+      for (uint32_t frequency = first_frequency;
+           frequency <= last_frequency;
+           frequency += amradio::STEP_FREQUENCY, ++frequency_index)
+      {
+        progress.SetPercentage(static_cast<int>((frequency_index * 100) /
+                                                std::max<size_t>(frequency_count, 1)));
+        progress.SetLine(0, "Scanning " + std::to_string(frequency / 1000) + " kHz AM");
+        if (progress.IsCanceled())
+        {
+          canceled = true;
+          break;
+        }
+
+        am_scan_measurement best;
+        for (int gain : coarse_gains)
+        {
+          progress.SetLine(1, "Coarse gain " + std::to_string(gain / 10) + "." +
+                                      std::to_string(std::abs(gain % 10)) + " dB");
+          am_scan_measurement const current = measure_am(frequency, gain);
+          kodi::Log(ADDON_LOG_DEBUG,
+                    "AM_SCAN freq=%u gain=%d reports=%d power=%.1f snr=%.1f overload=%d detected=%d",
+                    frequency, gain, current.reports, current.power, current.snr,
+                    current.overload ? 1 : 0, current.detected ? 1 : 0);
+          if ((best.reports == 0) || (!current.overload && best.overload) ||
+              ((current.overload == best.overload) && current.snr > best.snr))
+            best = current;
+        }
+
+        if (best.snr >= 4.0f && best.power > -68.0f)
+        {
+          auto best_iterator = std::find(valid_gains.begin(), valid_gains.end(), best.gain);
+          if (best_iterator != valid_gains.end())
+          {
+            size_t const best_index = static_cast<size_t>(best_iterator - valid_gains.begin());
+            size_t const begin = (best_index > 2) ? best_index - 2 : 0;
+            size_t const end = std::min(valid_gains.size(), best_index + 3);
+            for (size_t index = begin; index < end; ++index)
+            {
+              int const gain = valid_gains[index];
+              if (std::find(coarse_gains.begin(), coarse_gains.end(), gain) != coarse_gains.end())
+                continue;
+              progress.SetLine(1, "Fine gain search");
+              am_scan_measurement const current = measure_am(frequency, gain);
+              if ((!current.overload && best.overload) ||
+                  ((current.overload == best.overload) && current.snr > best.snr))
+                best = current;
+            }
+          }
+        }
+
+        if (best.detected)
+        {
+          connectionpool::handle dbhandle(m_connpool);
+          struct channelprops channelprops = {};
+          channelprops.frequency = frequency;
+          channelprops.modulation = modulation::am;
+          channelprops.name = std::to_string(frequency / 1000) + " AM";
+          channelprops.autogain = false;
+          channelprops.manualgain = best.gain;
+          channelprops.freqcorrection = 0;
+
+          bool const exists = channel_exists(dbhandle, channelprops);
+          if (exists)
+          {
+            struct channelprops existing = {};
+            get_channel_properties(dbhandle, frequency, modulation::am, existing);
+            channelprops.name = existing.name;
+            channelprops.logourl = existing.logourl;
+            channelprops.freqcorrection = existing.freqcorrection;
+          }
+          if (exists)
+            update_channel(dbhandle, channelprops);
+          else
+            add_channel(dbhandle, channelprops);
+          channels_found++;
+        }
+      }
+
+      progress.SetPercentage(canceled ? 95 : 100);
+      TriggerChannelUpdate();
+      TriggerChannelGroupsUpdate();
+      kodi::gui::dialogs::OK::ShowAndGetInput(
+          canceled ? "AM Radio scan canceled" : "AM Radio scan complete",
+          std::to_string(channels_found) + " AM station(s) added or updated.");
+      return;
+    }
 
     if (scan_modulation == modulation::wx)
     {
@@ -4493,12 +4792,14 @@ bool addon::OpenLiveStream(kodi::addon::PVRChannel const& channel)
 
     // FM Radio
     //
-    if (channelprops.modulation == modulation::fm)
+    if ((channelprops.modulation == modulation::fm) ||
+        (channelprops.modulation == modulation::am))
     {
 
       // Set up the FM digital signal processor properties
       struct fmprops fmprops = {};
-      fmprops.decoderds = settings.fmradio_enable_rds;
+      fmprops.decoderds = (channelprops.modulation == modulation::fm) &&
+                          settings.fmradio_enable_rds;
       fmprops.isnorthamerica = is_region_northamerica(settings);
       fmprops.samplerate = settings.fmradio_sample_rate;
       fmprops.downsamplequality = static_cast<int>(settings.fmradio_downsample_quality);
@@ -4506,7 +4807,9 @@ bool addon::OpenLiveStream(kodi::addon::PVRChannel const& channel)
       fmprops.outputgain = settings.fmradio_output_gain;
 
       // Log information about the stream for diagnostic purposes
-      log_info(__func__, ": Creating fmstream for channel \"", channelprops.name, "\"");
+      log_info(__func__, ": Creating ",
+               (channelprops.modulation == modulation::am) ? "AM" : "FM",
+               " stream for channel \"", channelprops.name, "\"");
       log_info(__func__, ": tunerprops.freqcorrection = ", tunerprops.freqcorrection, " PPM");
       log_info(__func__, ": fmprops.decoderds = ", (fmprops.decoderds) ? "true" : "false");
       log_info(__func__,
