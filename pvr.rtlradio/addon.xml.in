@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <addon
   id="pvr.rtlradio"
-  version="21.0.0"
+  version="21.1.0"
   name="RTL-SDR Radio PVR Client"
   provider-name="Michael Brehm (djp952), Team Kodi">
   <requires>@ADDON_DEPENDS@</requires>
@@ -11,7 +11,7 @@
   <extension point="xbmc.addon.metadata">
     <platform>@PLATFORM@</platform>
     <license>MIT License (https://opensource.org/licenses/MIT)</license>
-    <source>https://github.com/kodi-pvr/pvr.rtlradio</source>
+    <source>https://github.com/leszekm1/pvr.rtlradio</source>
     <forum>https://forum.kodi.tv/forumdisplay.php?fid=167</forum>
     <assets>
       <icon>resources/icon.png</icon>

@@ -1,66 +1,118 @@
-name: Make Release
-# Create a release on the given branch
-# Release and tag name format will be <version>-<branch>
-# The body of the release will be created from the changelog.txt or news element in the addon.xml.in
+name: Build LibreELEC release
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: libreelec-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  ADDON_ID: pvr.rtlradio
+  LIBREELEC_REF: 12.2.1
 
 jobs:
-  default:
-    runs-on: ubuntu-latest
-    name: Make Release
+  build:
+    name: LibreELEC 12.2 Generic x86_64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 330
 
     steps:
-
-      # Checkout the current repository into a directory (repositories name)
-      - name: Checkout Repository
+      - name: Check out add-on source
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          path: ${{ github.event.repository.name }}
 
-      # Install all dependencies required by the following steps
-      # - libxml2-utils, xmlstarlet: reading news and version from addon.xml.in
-      - name: Install dependencies
+      - name: Free build disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/.ghcup
+
+      - name: Install LibreELEC build prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install libxml2-utils xmlstarlet
+          sudo apt-get install -y bc g++ gcc git gperf make openjdk-11-jre-headless \
+            rsync unzip xfonts-utils xsltproc xz-utils zip
 
-      # Create the variables required by the following steps
-      # - steps.required-variables.outputs.changes: latest entry in the changelog.txt (if exists), or addon.xml.in news element
-      # - steps.required-variables.outputs.version: version element from addon.xml.in
-      # - steps.required-variables.outputs.branch: branch of the triggering ref
-      # Note: we use a random EOF for 'changes' as is best practice for for multiline variables
-      - name: Get required variables
-        id: required-variables
-        run: |
-          changes=$(cat "$(find . -name changelog.txt)" | awk -v RS= 'NR==1')
-          if [ -z "$changes" ] ;
-          then
-            changes=$(xmlstarlet fo -R "$(find . -name addon.xml.in)" | xmlstarlet sel -t -v 'string(/addon/extension/news)' | awk -v RS= 'NR==1')
-          fi
-          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
-          echo "changes<<$EOF" >> $GITHUB_OUTPUT
-          echo "$changes" >> $GITHUB_OUTPUT
-          echo "$EOF" >> $GITHUB_OUTPUT
-          version=$(xmlstarlet fo -R "$(find . -name addon.xml.in)" | xmlstarlet sel -t -v 'string(/addon/@version)')
-          echo "version=$version" >> $GITHUB_OUTPUT
-          branch=$(echo ${GITHUB_REF#refs/heads/})
-          echo "branch=$branch" >> $GITHUB_OUTPUT
-        working-directory: ${{ github.event.repository.name }}
-
-      # Create a release at {steps.required-variables.outputs.branch}
-      # - tag and release name format: {steps.required-variables.outputs.version}-{steps.required-variables.outputs.branch} ie. 20.0.0-Nexus
-      # - release body: {steps.required-variables.outputs.changes}
-      - name: Create Release
-        id: create-release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check out LibreELEC
+        uses: actions/checkout@v4
         with:
-          tag_name: ${{ steps.required-variables.outputs.version }}-${{ steps.required-variables.outputs.branch }}
-          release_name: ${{ steps.required-variables.outputs.version }}-${{ steps.required-variables.outputs.branch }}
-          body: ${{ steps.required-variables.outputs.changes }}
-          draft: false
-          prerelease: false
-          commitish: ${{ steps.required-variables.outputs.branch }}
+          repository: LibreELEC/LibreELEC.tv
+          ref: ${{ env.LIBREELEC_REF }}
+          path: libreelec
+
+      - name: Cache downloaded sources and compiler output
+        uses: actions/cache@v4
+        with:
+          path: |
+            libreelec/sources
+            libreelec/build.LibreELEC-Generic.x86_64-12.2-devel/.ccache
+          key: libreelec-${{ env.LIBREELEC_REF }}-generic-x86_64-${{ github.sha }}
+          restore-keys: |
+            libreelec-${{ env.LIBREELEC_REF }}-generic-x86_64-
+
+      - name: Configure LibreELEC package
+        run: |
+          archive_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/archive/${GITHUB_SHA}.tar.gz"
+          curl -L --fail --retry 3 --output source.tar.gz "$archive_url"
+          source_sha256="$(sha256sum source.tar.gz | cut -d ' ' -f 1)"
+          python3 tools/render-libreelec-package.py \
+            --template packaging/libreelec/package.mk.in \
+            --output libreelec/packages/mediacenter/kodi-binary-addons/pvr.rtlradio/package.mk \
+            --version "$GITHUB_SHA" \
+            --sha256 "$source_sha256" \
+            --site "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --url "$archive_url"
+
+      - name: Build installable add-on ZIP
+        working-directory: libreelec
+        env:
+          PROJECT: Generic
+          ARCH: x86_64
+          ADDON_OVERWRITE: "yes"
+        run: scripts/create_addon pvr.rtlradio
+
+      - name: Validate and name release artifact
+        id: package
+        run: |
+          zip_path="$(find libreelec/target/addons -type f -name 'pvr.rtlradio-*.zip' -print -quit)"
+          test -n "$zip_path"
+          addon_version="$(python3 tools/validate-addon-zip.py \
+            --addon-id "$ADDON_ID" \
+            --github-output "$GITHUB_OUTPUT" \
+            --print-version \
+            "$zip_path")"
+          release_zip="pvr.rtlradio-${addon_version}-LibreELEC-Generic.x86_64-${LIBREELEC_REF}.zip"
+          cp "$zip_path" "$release_zip"
+          sha256sum "$release_zip" > "$release_zip.sha256"
+          echo "release_zip=$release_zip" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pvr.rtlradio-${{ steps.package.outputs.addon_version }}-LibreELEC-Generic.x86_64-${{ env.LIBREELEC_REF }}
+          path: |
+            ${{ steps.package.outputs.release_zip }}
+            ${{ steps.package.outputs.release_zip }}.sha256
+          if-no-files-found: error
+
+      - name: Verify release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: test "$GITHUB_REF_NAME" = "v${{ steps.package.outputs.addon_version }}"
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ZIP: ${{ steps.package.outputs.release_zip }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "$RELEASE_ZIP" "$RELEASE_ZIP.sha256" \
+            --title "pvr.rtlradio ${{ steps.package.outputs.addon_version }} for LibreELEC 12.2 Generic x86_64" \
+            --generate-notes

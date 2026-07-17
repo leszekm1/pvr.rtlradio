@@ -7,7 +7,8 @@ FM Radio Digital Signal Processing derived from [__CuteSDR__](https://sourceforg
 Hybrid Digital (HD) Radio Digital Signal Processing derived from [__NRSC5__](https://github.com/theori-io/nrsc5)   
 Digital Audio Broadcast (DAB) Digital Signal Processing adapted from project [__welle.io__](https://github.com/AlbrechtL/welle.io)
 
-[![Build and run tests](https://github.com/kodi-pvr/pvr.rtlradio/actions/workflows/build.yml/badge.svg?branch=Omega)](https://github.com/kodi-pvr/pvr.rtlradio/actions/workflows/build.yml)
+[![Build and run tests](https://github.com/leszekm1/pvr.rtlradio/actions/workflows/build.yml/badge.svg?branch=Omega)](https://github.com/leszekm1/pvr.rtlradio/actions/workflows/build.yml)
+[![Build LibreELEC release](https://github.com/leszekm1/pvr.rtlradio/actions/workflows/release.yml/badge.svg)](https://github.com/leszekm1/pvr.rtlradio/actions/workflows/release.yml)
 [![Build Status](https://dev.azure.com/teamkodi/kodi-pvr/_apis/build/status/kodi-pvr.pvr.rtlradio?branchName=Omega)](https://dev.azure.com/teamkodi/kodi-pvr/_build/latest?definitionId=85&branchName=Omega)
 [![Build Status](https://jenkins.kodi.tv/view/Addons/job/kodi-pvr/job/pvr.rtlradio/job/Omega/badge/icon)](https://jenkins.kodi.tv/blue/organizations/jenkins/kodi-pvr%2Fpvr.rtlradio/branches/)
 
@@ -30,6 +31,19 @@ suggested by the README.
 
 The addon files will be placed in `../../xbmc/kodi-build/addons` so if you build Kodi from source and run it directly 
 the addon will be available as a system addon.
+
+## LibreELEC releases
+
+GitHub releases provide a Kodi-installable ZIP for LibreELEC 12.2/12.2.1 on
+Generic x86_64. The ZIP includes the add-on binary and the non-system shared
+libraries it needs. Download the ZIP from the repository's Releases page and
+use Kodi's **Add-ons > Install from zip file** command. Do not extract it first.
+
+Every version tag matching the generated add-on version, for example
+`v21.1.0.1`, builds the add-on from source with the LibreELEC 12.2.1 toolchain,
+validates the archive layout, uploads a SHA-256 checksum, and publishes the
+GitHub release. A manual workflow run builds the same files as downloadable
+workflow artifacts without publishing a release.
 
 ##### Useful links
 

@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: MIT
+# LibreELEC package template rendered by the GitHub release workflow.
+
+PKG_NAME="pvr.rtlradio"
+PKG_VERSION="@PKG_VERSION@"
+PKG_SHA256="@PKG_SHA256@"
+PKG_REV="1"
+PKG_ARCH="any"
+PKG_LICENSE="MIT"
+PKG_SITE="@PKG_SITE@"
+PKG_URL="@PKG_URL@"
+PKG_DEPENDS_TARGET="toolchain kodi-platform fftw3 fdk-aac glm libusb mpg123 rapidjson sqlite rtl-sdr"
+PKG_SECTION=""
+PKG_SHORTDESC="pvr.rtlradio"
+PKG_LONGDESC="Realtek RTL28xxu RTL-SDR Radio PVR client for Kodi"
+PKG_IS_ADDON="yes"
+PKG_ADDON_TYPE="xbmc.pvrclient"
+
+PKG_CMAKE_OPTS_TARGET="-DDISTRIBUTION_BUILD=ON \
+                       -DUSB_DEVICE_SUPPORT=ON \
+                       -DCMAKE_POSITION_INDEPENDENT_CODE=ON"
+
+addon() {
+  install_binary_addon "${PKG_ADDON_ID}"
+
+  mkdir -p "${ADDON_BUILD}/${PKG_ADDON_ID}/lib"
+  cp -L "$(get_install_dir fdk-aac)"/usr/lib/libfdk-aac.so.2 \
+        "$(get_install_dir fftw3)"/usr/lib/libfftw3f.so.3 \
+        "$(get_install_dir fftw3)"/usr/lib/libfftw3l.so.3 \
+        "$(get_install_dir libusb)"/usr/lib/libusb-1.0.so.0 \
+        "$(get_install_dir rtl-sdr)"/usr/lib/librtlsdr.so.0 \
+        "${ADDON_BUILD}/${PKG_ADDON_ID}/lib"
+
+  patchelf --add-rpath '${ORIGIN}/lib' \
+    "${ADDON_BUILD}/${PKG_ADDON_ID}/pvr.rtlradio.so.21.0.0"
+}

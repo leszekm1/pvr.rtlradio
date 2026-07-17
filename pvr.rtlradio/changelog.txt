@@ -1,2 +1,9 @@
+v21.1.0
+- Add analog AM radio reception and scanning for the North American band
+- Add AM HD Radio reception and scanning with automatic gain refinement
+- Add North American FM, HD Radio, and Weather Radio scanning improvements
+- Add AM channel import, export, settings, and kHz user-interface support
+- Fix LibreELEC CMake, FFTW linkage, and packaged runtime dependencies
+
 v21.0.0
 - Initial Team Kodi release
