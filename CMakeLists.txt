@@ -30,6 +30,7 @@ endif()
 find_package(Kodi REQUIRED)
 find_package(FFTW REQUIRED)
 find_package(FDK_AAC REQUIRED)
+find_package(FAAD2_HDC REQUIRED)
 find_package(glm REQUIRED)
 find_package(MPG123 REQUIRED)
 find_package(RapidJSON 1.1.0 REQUIRED)
@@ -51,17 +52,19 @@ else()
   add_definitions(${OPENGLES_DEFINITIONS})
 endif()
 
-add_definitions(-DDABLIN_AAC_FDKAAC -DFFTW_NO_Complex -Drtlsdr_EXPORTS=1)
+add_definitions(-DDABLIN_AAC_FDKAAC -DFFTW_NO_Complex -DHAVE_FAAD2 -Drtlsdr_EXPORTS=1)
 
 include_directories(${KODI_INCLUDE_DIR}/.. # Hack way with "/..", need bigger Kodi cmake rework to match right include ways
                     ${FFTW_INCLUDE_DIRS}
                     ${FDK_AAC_INCLUDE_DIRS}
+                    ${FAAD2_HDC_INCLUDE_DIRS}
                     ${GLM_INCLUDE_DIR}
                     ${MPG123_INCLUDE_DIR}
                     ${RAPIDJSON_INCLUDE_DIRS}
                     ${SQLITE3_INCLUDE_DIR})
 
 list(APPEND DEPLIBS ${FDK_AAC_LIBRARIES}
+                    ${FAAD2_HDC_LIBRARIES}
                     ${FFTW_LONGDOUBLE_LIB}
                     ${FFTW_FLOAT_LIB}
                     ${MPG123_LIBRARIES}

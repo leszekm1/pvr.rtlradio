@@ -1,0 +1,1 @@
+faad2-hdc https://github.com/knik0/faad2/archive/2.11.2.tar.gz

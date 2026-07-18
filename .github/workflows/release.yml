@@ -59,6 +59,9 @@ jobs:
 
       - name: Configure LibreELEC package
         run: |
+          mkdir -p libreelec/packages/addons/addon-depends/faad2/patches
+          cp depends/common/faad2-hdc/faad2-hdc-support.patch \
+            libreelec/packages/addons/addon-depends/faad2/patches/faad2-001-hdc-support.patch
           archive_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/archive/${GITHUB_SHA}.tar.gz"
           curl -L --fail --retry 3 --output source.tar.gz "$archive_url"
           source_sha256="$(sha256sum source.tar.gz | cut -d ' ' -f 1)"
@@ -83,6 +86,10 @@ jobs:
         run: |
           zip_path="$(find libreelec/target/addons -type f -name 'pvr.rtlradio-*.zip' -print -quit)"
           test -n "$zip_path"
+          binary_member="$(unzip -Z1 "$zip_path" | grep -E '^pvr\.rtlradio/pvr\.rtlradio\.so\.' | head -1)"
+          test -n "$binary_member"
+          unzip -p "$zip_path" "$binary_member" > /tmp/pvr.rtlradio.so
+          readelf -Ws /tmp/pvr.rtlradio.so | grep -q 'NeAACDecInitHDC'
           addon_version="$(python3 tools/validate-addon-zip.py \
             --addon-id "$ADDON_ID" \
             --github-output "$GITHUB_OUTPUT" \

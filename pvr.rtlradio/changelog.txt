@@ -1,3 +1,6 @@
+v21.1.0.2
+- Restore FM HD Radio audio decoding with the required HDC-patched FAAD2 library.
+
 v21.1.0
 - Add analog AM radio reception and scanning for the North American band
 - Add AM HD Radio reception and scanning with automatic gain refinement

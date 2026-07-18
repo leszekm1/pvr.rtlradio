@@ -39,6 +39,11 @@ Generic x86_64. The ZIP includes the add-on binary and the non-system shared
 libraries it needs. Download the ZIP from the repository's Releases page and
 use Kodi's **Add-ons > Install from zip file** command. Do not extract it first.
 
+HD Radio audio requires the HDC-patched FAAD2 decoder. The dependency metadata
+and patch are kept under `depends/common/faad2-hdc`; the LibreELEC release
+workflow applies the same patch to its `faad2` package before building the
+add-on.
+
 Every version tag matching the generated add-on version, for example
 `v21.1.0.1`, builds the add-on from source with the LibreELEC 12.2.1 toolchain,
 validates the archive layout, uploads a SHA-256 checksum, and publishes the
