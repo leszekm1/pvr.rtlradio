@@ -61,6 +61,7 @@ jobs:
         cmake -S "$faad_source" -B "$faad_source/build" \
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_INSTALL_PREFIX="$faad_prefix" \
+          -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
           -DBUILD_SHARED_LIBS=OFF
         cmake --build "$faad_source/build" --parallel 2
         cmake --install "$faad_source/build"
