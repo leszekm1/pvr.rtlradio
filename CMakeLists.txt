@@ -65,7 +65,6 @@ include_directories(${KODI_INCLUDE_DIR}/.. # Hack way with "/..", need bigger Ko
 
 list(APPEND DEPLIBS ${FDK_AAC_LIBRARIES}
                     ${FAAD2_HDC_LIBRARIES}
-                    ${FFTW_LONGDOUBLE_LIB}
                     ${FFTW_FLOAT_LIB}
                     ${MPG123_LIBRARIES}
                     ${SQLITE3_LIBRARY})
