@@ -33,6 +33,14 @@ jobs:
       uses: actions/checkout@v4
       with:
         path: ${{ env.app_id }}
+    - name: Register add-on definition
+      if: matrix.DEBIAN_BUILD != true
+      run: |
+        definition_dir="${GITHUB_WORKSPACE}/xbmc/cmake/addons/addons/${app_id}"
+        mkdir -p "$definition_dir"
+        echo "${app_id} https://github.com/${GITHUB_REPOSITORY} Omega" \
+          > "$definition_dir/${app_id}.txt"
+        echo "all" > "$definition_dir/platforms.txt"
     - name: Build HDC-patched FAAD2
       if: matrix.DEBIAN_BUILD != true
       run: |
