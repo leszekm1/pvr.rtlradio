@@ -29,6 +29,7 @@ post_makeinstall_target() {
     --enable-long-double
 
   make
+  make DESTDIR="${SYSROOT_PREFIX}" install
   make DESTDIR="${PKG_INSTALL}" install
 
   make distclean || true
@@ -43,5 +44,6 @@ post_makeinstall_target() {
     --enable-single
 
   make
+  make DESTDIR="${SYSROOT_PREFIX}" install
   make DESTDIR="${PKG_INSTALL}" install
 }
