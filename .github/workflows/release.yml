@@ -62,13 +62,16 @@ jobs:
         run: |
           gmp_archive="libreelec/sources/gmp/gmp-6.3.0.tar.xz"
           gmp_sha256="a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898"
+          gmp_url="https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz"
           mkdir -p "$(dirname "$gmp_archive")"
           if ! echo "$gmp_sha256  $gmp_archive" | sha256sum --check --status; then
             curl -L --fail --retry 5 --retry-all-errors --connect-timeout 20 \
               --output "$gmp_archive" \
-              https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz
+              "$gmp_url"
           fi
           echo "$gmp_sha256  $gmp_archive" | sha256sum --check
+          printf '%s\n' "$gmp_url" > "$gmp_archive.url"
+          printf '%s\n' "$gmp_sha256" > "$gmp_archive.sha256"
 
       - name: Configure LibreELEC package
         run: |
