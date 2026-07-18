@@ -1,5 +1,6 @@
-v21.1.0.2
+v21.1.0.3
 - Restore FM HD Radio audio decoding with the required HDC-patched FAAD2 library.
+- Fix LibreELEC release prerequisites and build the HDC decoder in desktop CI.
 
 v21.1.0
 - Add analog AM radio reception and scanning for the North American band
