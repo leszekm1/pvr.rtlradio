@@ -60,6 +60,7 @@ jobs:
 
       - name: Configure LibreELEC package
         run: |
+          cp -R packaging/libreelec/packages/. libreelec/packages/
           mkdir -p libreelec/packages/addons/addon-depends/faad2/patches
           cp depends/common/faad2-hdc/faad2-hdc-support.patch \
             libreelec/packages/addons/addon-depends/faad2/patches/faad2-001-hdc-support.patch
