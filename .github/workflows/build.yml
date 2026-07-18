@@ -14,7 +14,7 @@ jobs:
           os: ubuntu-latest
           CC: gcc
           CXX: g++
-  #        DEBIAN_BUILD: true
+          DEBIAN_BUILD: false
     steps:
     - name: Install needed ubuntu depends
       env:
@@ -33,6 +33,29 @@ jobs:
       uses: actions/checkout@v4
       with:
         path: ${{ env.app_id }}
+    - name: Build HDC-patched FAAD2
+      if: matrix.DEBIAN_BUILD != true
+      run: |
+        faad_archive="${RUNNER_TEMP}/faad2-2.11.2.tar.gz"
+        faad_source="${RUNNER_TEMP}/faad2-2.11.2"
+        faad_prefix="${RUNNER_TEMP}/faad2-hdc"
+        curl -L --fail --retry 3 \
+          --output "$faad_archive" \
+          https://github.com/knik0/faad2/archive/2.11.2.tar.gz
+        echo "3fcbd305e4abd34768c62050e18ca0986f7d9c5eca343fb98275418013065c0e  $faad_archive" \
+          | sha256sum --check --strict
+        mkdir -p "$faad_source"
+        tar --extract --gzip --file "$faad_archive" \
+          --directory "$faad_source" --strip-components=1
+        patch --directory "$faad_source" --strip=1 \
+          < "${GITHUB_WORKSPACE}/${app_id}/depends/common/faad2-hdc/faad2-hdc-support.patch"
+        cmake -S "$faad_source" -B "$faad_source/build" \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX="$faad_prefix" \
+          -DBUILD_SHARED_LIBS=OFF
+        cmake --build "$faad_source/build" --parallel 2
+        cmake --install "$faad_source/build"
+        echo "FAAD2_HDC_ROOT=$faad_prefix" >> "$GITHUB_ENV"
     - name: Configure
       env:
         CC: ${{ matrix.CC }}
@@ -40,7 +63,7 @@ jobs:
         DEBIAN_BUILD: ${{ matrix.DEBIAN_BUILD }}
       run: |
         if [[ $DEBIAN_BUILD != true ]]; then cd ${app_id} && mkdir -p build && cd build; fi
-        if [[ $DEBIAN_BUILD != true ]]; then cmake -DADDONS_TO_BUILD=${app_id} -DADDON_SRC_PREFIX=${{ github.workspace }} -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/xbmc/addons -DPACKAGE_ZIP=1 ${{ github.workspace }}/xbmc/cmake/addons; fi
+        if [[ $DEBIAN_BUILD != true ]]; then cmake -DADDONS_TO_BUILD=${app_id} -DADDON_SRC_PREFIX=${{ github.workspace }} -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/xbmc/addons -DFAAD2_HDC_ROOT="$FAAD2_HDC_ROOT" -DPACKAGE_ZIP=1 ${{ github.workspace }}/xbmc/cmake/addons; fi
         if [[ $DEBIAN_BUILD == true ]]; then wget https://raw.githubusercontent.com/xbmc/xbmc/Omega/xbmc/addons/kodi-dev-kit/tools/debian-addon-package-test.sh && chmod +x ./debian-addon-package-test.sh; fi
         if [[ $DEBIAN_BUILD == true ]]; then sudo apt-get build-dep ${{ github.workspace }}/${app_id}; fi
     - name: Build

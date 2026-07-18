@@ -38,7 +38,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y bc g++ gcc git gperf make openjdk-11-jre-headless \
-            rsync unzip xfonts-utils xsltproc xz-utils zip
+            libparse-yapp-perl libxml-parser-perl lzop patchutils rdfind rsync \
+            unzip xfonts-utils xsltproc xz-utils zip
 
       - name: Check out LibreELEC
         uses: actions/checkout@v4
