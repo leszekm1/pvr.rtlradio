@@ -58,6 +58,18 @@ jobs:
           restore-keys: |
             libreelec-${{ env.LIBREELEC_REF }}-generic-x86_64-
 
+      - name: Seed GMP source archive
+        run: |
+          gmp_archive="libreelec/sources/gmp/gmp-6.3.0.tar.xz"
+          gmp_sha256="a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898"
+          mkdir -p "$(dirname "$gmp_archive")"
+          if ! echo "$gmp_sha256  $gmp_archive" | sha256sum --check --status; then
+            curl -L --fail --retry 5 --retry-all-errors --connect-timeout 20 \
+              --output "$gmp_archive" \
+              https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz
+          fi
+          echo "$gmp_sha256  $gmp_archive" | sha256sum --check
+
       - name: Configure LibreELEC package
         run: |
           cp -R packaging/libreelec/packages/. libreelec/packages/
