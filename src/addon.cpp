@@ -3150,6 +3150,7 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
         if (std::find(coarse_gains.begin(), coarse_gains.end(), gain) == coarse_gains.end())
           coarse_gains.emplace_back(gain);
       }
+      std::sort(coarse_gains.begin(), coarse_gains.end());
 
       auto score_fm_rds_scan_result =
           [](fm_rds_scan_result const& result) -> int
@@ -3722,6 +3723,9 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
       if (valid_gains.empty())
         valid_gains = {0, 27, 77, 125, 197, 280, 328, 386, 439, 496};
 
+      std::sort(valid_gains.begin(), valid_gains.end());
+      valid_gains.erase(std::unique(valid_gains.begin(), valid_gains.end()), valid_gains.end());
+
       auto nearest_gain = [&](int desired) -> int
       {
         return *std::min_element(valid_gains.begin(), valid_gains.end(),
@@ -3738,6 +3742,7 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
         if (std::find(coarse_gains.begin(), coarse_gains.end(), gain) == coarse_gains.end())
           coarse_gains.emplace_back(gain);
       }
+      std::sort(coarse_gains.begin(), coarse_gains.end());
 
       auto measure_am = [&](uint32_t frequency, int gain) -> am_scan_measurement
       {
@@ -3990,6 +3995,9 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
             445, 480, 496};
       }
 
+      std::sort(valid_gains.begin(), valid_gains.end());
+      valid_gains.erase(std::unique(valid_gains.begin(), valid_gains.end()), valid_gains.end());
+
       auto nearest_valid_gain = [&](int desired) -> int
       {
         int best = valid_gains.front();
@@ -4009,12 +4017,13 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
       };
 
       std::vector<int> scan_gains;
-      for (int desired : {27, 328, 197, 87})
+      for (int desired : {27, 87, 197, 328})
       {
         int gain = nearest_valid_gain(desired);
         if (std::find(scan_gains.begin(), scan_gains.end(), gain) == scan_gains.end())
           scan_gains.emplace_back(gain);
       }
+      std::sort(scan_gains.begin(), scan_gains.end());
 
       auto measure_wx =
           [&](uint32_t frequency, int gain) -> wx_scan_measurement
@@ -4263,9 +4272,9 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
       uint32_t const total_frequencies = ((last_frequency - first_frequency) / step_frequency) + 1;
       char const* const frequency_unit = hd_am_scan ? " kHz" : " MHz";
 
-      // Coarse gains based on your measured Seattle gain JSON:
-      // high ~= 197, mid ~= 87, low ~= 27, in tenths of dB.
-      std::vector<int> coarse_gain_targets = {328, 197, 87, 27};
+      // Coarse gains based on measured Seattle gain data, ordered from
+      // lowest to highest in tenths of dB.
+      std::vector<int> coarse_gain_targets = {27, 87, 197, 328};
 
       auto const coarse_scan_time = std::chrono::seconds(8);
       auto const coarse_minimum_time = std::chrono::seconds(3);
@@ -4360,7 +4369,7 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
       for (auto target : coarse_gain_targets)
         coarse_gains.push_back(nearest_valid_gain(target));
 
-      std::sort(coarse_gains.begin(), coarse_gains.end(), std::greater<int>());
+      std::sort(coarse_gains.begin(), coarse_gains.end());
       coarse_gains.erase(std::unique(coarse_gains.begin(), coarse_gains.end()), coarse_gains.end());
 
       auto quality_score = [](gain_scan_result const& result) -> float
@@ -4627,7 +4636,7 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
                     std::to_string(subchannels_found) +
                     " HD channel(s) found",
                 hd_am_scan ? "Using Q-branch direct sampling"
-                           : "Trying high/mid/low manual gain"))
+                           : "Trying low/mid/high manual gain"))
         {
           canceled = true;
           break;
@@ -4717,7 +4726,7 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
                    ": no HD lock at ",
                    freq_label,
                    frequency_unit,
-                   hd_am_scan ? " using direct sampling" : " using coarse gains high/mid/low");
+                   hd_am_scan ? " using direct sampling" : " using coarse gains low/mid/high");
           continue;
         }
 
