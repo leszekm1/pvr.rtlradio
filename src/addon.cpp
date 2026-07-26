@@ -3416,13 +3416,16 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
         bool perfect_gain_found = false;
 
         auto consider_result =
-            [&](fm_rds_scan_result const& candidate) -> void
+            [&](fm_rds_scan_result const& candidate) -> bool
         {
           if (candidate.found && !candidate.name.empty() &&
               (!best.found || (candidate.score > best.score)))
           {
             best = candidate;
+            return true;
           }
+
+          return false;
         };
 
         for (int gain : coarse_gains)
@@ -3497,11 +3500,13 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
                    fine_gain_window,
                    " of coarse lock(s)");
 
+          int consecutive_worse_gains = 0;
+
           for (int gain : fine_gains)
           {
             fm_rds_scan_result current =
                 scan_one_fm(frequency, gain, percent, fine_scan_time);
-            consider_result(current);
+            bool const improved = consider_result(current);
 
             if (current.found && !current.name.empty() && current.perfect_levels)
             {
@@ -3518,6 +3523,32 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
 
             if (canceled)
               break;
+
+            if (improved)
+            {
+              consecutive_worse_gains = 0;
+            }
+            else if (gain > best.gain)
+            {
+              bool const worse =
+                  current.quality < best.quality ||
+                  (current.quality == best.quality && current.snr < best.snr);
+
+              consecutive_worse_gains = worse ? consecutive_worse_gains + 1 : 0;
+              if (consecutive_worse_gains >= 3)
+              {
+                log_info(__func__,
+                         ": stopping FM fine gain search at ",
+                         format_frequency(frequency),
+                         " after 3 consecutive higher-gain candidates were worse than gain=",
+                         best.gain,
+                         " quality=",
+                         best.quality,
+                         " snr=",
+                         best.snr);
+                break;
+              }
+            }
           }
         }
 
@@ -4668,6 +4699,7 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
 
         gain_scan_result best = locked;
         float best_score = quality_score(best);
+        int consecutive_worse_gains = 0;
 
         auto gain_is_better = [&](gain_scan_result const& candidate,
                                   gain_scan_result const& current,
@@ -4724,7 +4756,25 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
             break;
 
           if (!fine.sync)
+          {
+            if (fine_gain > best.gain && best.muxdata.ber_valid)
+            {
+              consecutive_worse_gains += 1;
+              if (consecutive_worse_gains >= 3)
+              {
+                log_info(__func__,
+                         ": stopping HD fine gain search at ",
+                         freq_label,
+                         frequency_unit,
+                         " after 3 consecutive higher-gain candidates had worse BER than gain=",
+                         best.gain,
+                         " ber=",
+                         best.muxdata.cber);
+                break;
+              }
+            }
             continue;
+          }
 
           float score = quality_score(fine);
 
@@ -4742,10 +4792,34 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
             break;
           }
 
+          bool improved = false;
           if (!best.sync || gain_is_better(fine, best, score, best_score))
           {
             best = fine;
             best_score = score;
+            improved = true;
+            consecutive_worse_gains = 0;
+          }
+
+          if (!improved && fine_gain > best.gain && best.muxdata.ber_valid)
+          {
+            bool const worse =
+                !fine.muxdata.ber_valid ||
+                fine.muxdata.cber > best.muxdata.cber + 0.0000005f;
+
+            consecutive_worse_gains = worse ? consecutive_worse_gains + 1 : 0;
+            if (consecutive_worse_gains >= 3)
+            {
+              log_info(__func__,
+                       ": stopping HD fine gain search at ",
+                       freq_label,
+                       frequency_unit,
+                       " after 3 consecutive higher-gain candidates had worse BER than gain=",
+                       best.gain,
+                       " ber=",
+                       best.muxdata.cber);
+              break;
+            }
           }
         }
 
