@@ -2967,6 +2967,39 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
       selected_single_fm_rds_frequency = fm_frequencies[selected_frequency];
     }
 
+    struct screensaver_guard
+    {
+      bool inhibited = false;
+
+      screensaver_guard()
+      {
+#ifdef TARGET_LINUX
+        inhibited =
+            (std::system(
+                 "kodi-send --action='InhibitScreensaver(true)' >/dev/null 2>&1") == 0);
+        kodi::Log(ADDON_LOG_INFO,
+                  inhibited
+                      ? "Screen saver inhibited for channel scan"
+                      : "Unable to inhibit screen saver for channel scan");
+#endif
+      }
+
+      ~screensaver_guard()
+      {
+#ifdef TARGET_LINUX
+        if (inhibited)
+        {
+          // Kodi ignores built-in actions while a modal dialog's closing
+          // animation is active. Allow that animation to finish first.
+          std::this_thread::sleep_for(std::chrono::milliseconds(500));
+          std::system(
+              "kodi-send --action='InhibitScreensaver(false)' >/dev/null 2>&1");
+          kodi::Log(ADDON_LOG_INFO, "Screen saver restored after channel scan");
+        }
+#endif
+      }
+    } screensaver;
+
     // FM_RDS_SCAN_BRANCH_BEGIN
     if ((scan_mode == scan_mode_fm_rds) || (scan_mode == scan_mode_fm_rds_single))
     {
@@ -2985,6 +3018,7 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
         int gain = 0;
         int quality = 0;
         int snr = 0;
+        int stereo_lock = 0;
         std::string name;
         std::string callsign;
         std::string ps;
@@ -3013,8 +3047,11 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
             "FM Radio RDS scan requires FM sample rate between 900001Hz and 3200000Hz");
 
       auto const scan_time = std::chrono::seconds(6);
+      auto const fine_scan_time = std::chrono::seconds(3);
       auto const minimum_signal_time = std::chrono::milliseconds(1500);
       auto const minimum_name_time = std::chrono::milliseconds(2500);
+      int const minimum_unnamed_quality = 45;
+      int const minimum_unnamed_stereo_lock = 60;
 
       int channels_found = 0;
       bool canceled = false;
@@ -3023,6 +3060,14 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
       {
         char buffer[32] = {};
         snprintf(buffer, sizeof(buffer), "%.1f MHz",
+                 static_cast<double>(frequency) / 1000000.0);
+        return std::string(buffer);
+      };
+
+      auto format_fm_channel_name = [](uint32_t frequency) -> std::string
+      {
+        char buffer[32] = {};
+        snprintf(buffer, sizeof(buffer), "%.1f-FM",
                  static_cast<double>(frequency) / 1000000.0);
         return std::string(buffer);
       };
@@ -3094,16 +3139,15 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
         return best;
       };
 
-      std::vector<int> scan_gains;
+      std::vector<int> coarse_gains;
 
-      // Representative RTL-SDR manual gains, in tenths of dB.
-      // Try a wider range and choose the best result instead of accepting
-      // the first gain that happens to decode RDS/RBDS.
+      // Preserve the broad FM coarse coverage, then match the HD scan by
+      // fine tuning around every coarse gain that detects a usable station.
       for (int desired : {27, 87, 125, 197, 280, 328, 386, 439})
       {
         int gain = nearest_valid_gain(desired);
-        if (std::find(scan_gains.begin(), scan_gains.end(), gain) == scan_gains.end())
-          scan_gains.emplace_back(gain);
+        if (std::find(coarse_gains.begin(), coarse_gains.end(), gain) == coarse_gains.end())
+          coarse_gains.emplace_back(gain);
       }
 
       auto score_fm_rds_scan_result =
@@ -3128,6 +3172,7 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
 
         score += result.quality * 100;
         score += result.snr * 100;
+        score += result.stereo_lock * 100;
 
         // Small tie-breaker: prefer the lower gain when quality/SNR are equal.
         score -= result.gain / 10;
@@ -3140,7 +3185,10 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
       };
 
       auto scan_one_fm =
-          [&](uint32_t frequency, int gain, int percent) -> fm_rds_scan_result
+          [&](uint32_t frequency,
+              int gain,
+              int percent,
+              std::chrono::milliseconds scan_duration) -> fm_rds_scan_result
       {
         fm_rds_scan_result result = {};
         result.gain = gain;
@@ -3175,6 +3223,10 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
         std::atomic_bool found_name{false};
         std::atomic<int> quality{0};
         std::atomic<int> snr{0};
+        std::atomic<uint64_t> quality_sum{0};
+        std::atomic<uint64_t> snr_sum{0};
+        std::atomic<uint64_t> stereo_lock_samples{0};
+        std::atomic<uint64_t> level_samples{0};
         std::atomic<uint64_t> bytes{0};
         std::exception_ptr reader_exception = nullptr;
         std::mutex result_lock;
@@ -3228,9 +3280,16 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
                   int const s =
                       std::max(0, std::min(100,
                           static_cast<int>(100.0 * (demodsnr / 0.60))));
+                  int pilot_lock = 0;
+                  demodulator.GetStereoLock(&pilot_lock);
 
                   quality.store(q);
                   snr.store(s);
+                  quality_sum.fetch_add(static_cast<uint64_t>(q));
+                  snr_sum.fetch_add(static_cast<uint64_t>(s));
+                  if (pilot_lock != 0)
+                    stereo_lock_samples.fetch_add(1);
+                  level_samples.fetch_add(1);
 
                   if (decoder.has_rbds_callsign())
                   {
@@ -3264,7 +3323,7 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
         });
 
         auto const started = std::chrono::steady_clock::now();
-        auto const deadline = started + scan_time;
+        auto const deadline = started + scan_duration;
 
         while (std::chrono::steady_clock::now() < deadline)
         {
@@ -3278,7 +3337,10 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
             break;
 
           // Fast reject: weak/no usable WFM carrier after the demod has had time to settle.
-          if ((elapsed >= minimum_signal_time) && (q < 8) && (s < 8))
+          if ((elapsed >= minimum_signal_time) &&
+              (q < 8) &&
+              (s < 8) &&
+              (stereo_lock_samples.load() == 0))
             break;
 
           if (update_progress(percent,
@@ -3305,9 +3367,26 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
 
         {
           std::lock_guard<std::mutex> guard(result_lock);
-          result.quality = quality.load();
-          result.snr = snr.load();
+          uint64_t const samples = level_samples.load();
+          result.quality =
+              samples > 0 ? static_cast<int>(quality_sum.load() / samples) : quality.load();
+          result.snr =
+              samples > 0 ? static_cast<int>(snr_sum.load() / samples) : snr.load();
+          result.stereo_lock =
+              samples > 0
+                  ? static_cast<int>((stereo_lock_samples.load() * 100) / samples)
+                  : 0;
           result.bytes = bytes.load();
+
+          if (!result.found &&
+              result.bytes > 0 &&
+              (result.quality >= minimum_unnamed_quality ||
+               result.stereo_lock >= minimum_unnamed_stereo_lock))
+          {
+            result.found = true;
+            result.name = format_fm_channel_name(frequency);
+          }
+
           result.score = score_fm_rds_scan_result(result);
         }
 
@@ -3328,19 +3407,86 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
                              total_frequencies);
 
         fm_rds_scan_result best = {};
+        std::vector<fm_rds_scan_result> coarse_locks;
 
-        for (int gain : scan_gains)
+        auto consider_result =
+            [&](fm_rds_scan_result const& candidate) -> void
         {
-          fm_rds_scan_result current = scan_one_fm(frequency, gain, percent);
+          if (candidate.found && !candidate.name.empty() &&
+              (!best.found || (candidate.score > best.score)))
+          {
+            best = candidate;
+          }
+        };
+
+        for (int gain : coarse_gains)
+        {
+          fm_rds_scan_result current = scan_one_fm(frequency, gain, percent, scan_time);
 
           if (current.found && !current.name.empty())
           {
-            if (!best.found || (current.score > best.score))
-              best = current;
+            coarse_locks.emplace_back(current);
+            log_info(__func__,
+                     ": coarse FM candidate at ",
+                     format_frequency(frequency),
+                     " gain=",
+                     current.gain,
+                     " quality=",
+                     current.quality,
+                     " snr=",
+                     current.snr,
+                     " stereo_lock=",
+                     current.stereo_lock,
+                     " of 100 ",
+                     (!current.callsign.empty() || !current.ps.empty())
+                         ? " identity=RDS"
+                         : " identity=frequency");
           }
+
+          consider_result(current);
 
           if (canceled)
             break;
+        }
+
+        if (canceled)
+          break;
+
+        if (!coarse_locks.empty())
+        {
+          int const fine_gain_window = 200;
+          std::vector<int> fine_gains;
+
+          for (fm_rds_scan_result const& coarse_lock : coarse_locks)
+          {
+            for (int gain : valid_gains)
+            {
+              if (std::abs(gain - coarse_lock.gain) <= fine_gain_window)
+                fine_gains.emplace_back(gain);
+            }
+          }
+
+          std::sort(fine_gains.begin(), fine_gains.end());
+          fine_gains.erase(std::unique(fine_gains.begin(), fine_gains.end()), fine_gains.end());
+
+          log_info(__func__,
+                   ": fine tuning ",
+                   format_frequency(frequency),
+                   " using ",
+                   fine_gains.size(),
+                   " candidate gain(s) within +/-",
+                   fine_gain_window,
+                   " of coarse lock(s)");
+
+          for (int gain : fine_gains)
+          {
+            fm_rds_scan_result current =
+                scan_one_fm(frequency, gain, percent, fine_scan_time);
+            consider_result(current);
+
+            if (canceled)
+              break;
+          }
         }
 
         if (canceled)
@@ -3365,7 +3511,10 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
                                  channelprops.modulation,
                                  channelprops);
 
-          channelprops.name = best.name;
+          // Do not replace an existing RDS or user-supplied identity with a
+          // frequency fallback when this scan did not decode an RDS name.
+          if (!best.callsign.empty() || !best.ps.empty())
+            channelprops.name = best.name;
           channelprops.autogain = false;
           channelprops.manualgain = best.gain;
         }
@@ -3388,8 +3537,14 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
                  best.quality,
                  " snr=",
                  best.snr,
+                 " stereo_lock=",
+                 best.stereo_lock,
+                 " of 100 ",
                  " bytes=",
-                 best.bytes);
+                 best.bytes,
+                 (!best.callsign.empty() || !best.ps.empty())
+                     ? " identity=RDS"
+                     : " identity=frequency");
       }
 
       progress.SetPercentage(canceled ? 95 : 100);
