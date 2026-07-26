@@ -3558,6 +3558,75 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
         if (!best.found || best.name.empty())
           continue;
 
+        if (best.callsign.empty() && best.ps.empty())
+        {
+          bool adjacent_bleed = false;
+          std::vector<uint32_t> adjacent_frequencies;
+
+          if (frequency >= band_first_frequency + step_frequency)
+            adjacent_frequencies.emplace_back(frequency - step_frequency);
+          if (frequency <= band_last_frequency - step_frequency)
+            adjacent_frequencies.emplace_back(frequency + step_frequency);
+
+          for (uint32_t adjacent_frequency : adjacent_frequencies)
+          {
+            fm_rds_scan_result adjacent =
+                scan_one_fm(adjacent_frequency, best.gain, percent, fine_scan_time);
+
+            log_info(__func__,
+                     ": adjacent-channel check for ",
+                     format_frequency(frequency),
+                     " at ",
+                     format_frequency(adjacent_frequency),
+                     " gain=",
+                     best.gain,
+                     " quality=",
+                     adjacent.quality,
+                     " snr=",
+                     adjacent.snr);
+
+            if (canceled)
+              break;
+
+            if (adjacent.perfect_levels)
+            {
+              adjacent_bleed = true;
+              log_info(__func__,
+                       ": rejecting ",
+                       format_frequency(frequency),
+                       " as adjacent-channel bleed from ",
+                       format_frequency(adjacent_frequency),
+                       " after the adjacent center reached quality/SNR 100/100");
+              break;
+            }
+          }
+
+          if (canceled)
+            break;
+
+          if (adjacent_bleed)
+          {
+            struct channelprops existing = {};
+            existing.frequency = frequency;
+            existing.modulation = modulation::fm;
+
+            if (channel_exists(dbhandle, existing) &&
+                get_channel_properties(dbhandle,
+                                       existing.frequency,
+                                       existing.modulation,
+                                       existing) &&
+                existing.name == format_fm_channel_name(frequency))
+            {
+              delete_channel(dbhandle, frequency, modulation::fm);
+              log_info(__func__,
+                       ": removed stale frequency-named FM channel ",
+                       format_fm_channel_name(frequency));
+            }
+
+            continue;
+          }
+        }
+
         struct channelprops channelprops = {};
         channelprops.frequency = frequency;
         channelprops.modulation = modulation::fm;
