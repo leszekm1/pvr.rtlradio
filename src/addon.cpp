@@ -3014,6 +3014,7 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
       struct fm_rds_scan_result
       {
         bool found = false;
+        bool perfect_levels = false;
         uint64_t bytes = 0;
         int gain = 0;
         int quality = 0;
@@ -3223,6 +3224,7 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
         std::atomic_bool found_name{false};
         std::atomic<int> quality{0};
         std::atomic<int> snr{0};
+        std::atomic_bool perfect_levels{false};
         std::atomic<uint64_t> quality_sum{0};
         std::atomic<uint64_t> snr_sum{0};
         std::atomic<uint64_t> stereo_lock_samples{0};
@@ -3285,6 +3287,8 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
 
                   quality.store(q);
                   snr.store(s);
+                  if (q == 100 && s == 100)
+                    perfect_levels.store(true);
                   quality_sum.fetch_add(static_cast<uint64_t>(q));
                   snr_sum.fetch_add(static_cast<uint64_t>(s));
                   if (pilot_lock != 0)
@@ -3376,6 +3380,7 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
               samples > 0
                   ? static_cast<int>((stereo_lock_samples.load() * 100) / samples)
                   : 0;
+          result.perfect_levels = perfect_levels.load();
           result.bytes = bytes.load();
 
           if (!result.found &&
@@ -3408,6 +3413,7 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
 
         fm_rds_scan_result best = {};
         std::vector<fm_rds_scan_result> coarse_locks;
+        bool perfect_gain_found = false;
 
         auto consider_result =
             [&](fm_rds_scan_result const& candidate) -> void
@@ -3445,6 +3451,19 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
 
           consider_result(current);
 
+          if (current.found && !current.name.empty() && current.perfect_levels)
+          {
+            best = current;
+            perfect_gain_found = true;
+            log_info(__func__,
+                     ": accepting FM gain=",
+                     current.gain,
+                     " at ",
+                     format_frequency(frequency),
+                     " after quality/SNR reached 100/100");
+            break;
+          }
+
           if (canceled)
             break;
         }
@@ -3452,7 +3471,7 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
         if (canceled)
           break;
 
-        if (!coarse_locks.empty())
+        if (!coarse_locks.empty() && !perfect_gain_found)
         {
           int const fine_gain_window = 200;
           std::vector<int> fine_gains;
@@ -3483,6 +3502,19 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
             fm_rds_scan_result current =
                 scan_one_fm(frequency, gain, percent, fine_scan_time);
             consider_result(current);
+
+            if (current.found && !current.name.empty() && current.perfect_levels)
+            {
+              best = current;
+              perfect_gain_found = true;
+              log_info(__func__,
+                       ": accepting FM fine gain=",
+                       current.gain,
+                       " at ",
+                       format_frequency(frequency),
+                       " after quality/SNR reached 100/100");
+              break;
+            }
 
             if (canceled)
               break;
@@ -4250,6 +4282,11 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
           return ber - (std::max(0.0f, mer) * 0.000000001f);
         };
 
+      auto has_zero_ber = [](gain_scan_result const& result) -> bool
+        {
+          return result.muxdata.ber_valid && result.muxdata.cber <= 0.0000005f;
+        };
+
       connectionpool::handle dbhandle(m_connpool);
 
       std::function<gain_scan_result(uint32_t,
@@ -4555,6 +4592,19 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
                 locked = coarse;
               }
             }
+
+            if (has_zero_ber(coarse))
+            {
+              locked = coarse;
+              log_info(__func__,
+                       ": accepting HD coarse gain=",
+                       coarse.gain,
+                       " at ",
+                       freq_label,
+                       frequency_unit,
+                       " after BER reached 0");
+              break;
+            }
           }
         }
 
@@ -4587,23 +4637,34 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
           }
         };
 
-        for (auto const& coarse_lock : coarse_locks)
-          add_fine_window(coarse_lock.gain);
+        if (!has_zero_ber(locked))
+        {
+          for (auto const& coarse_lock : coarse_locks)
+            add_fine_window(coarse_lock.gain);
 
-        add_fine_window(locked.gain);
+          add_fine_window(locked.gain);
 
-        std::sort(fine_gains.begin(), fine_gains.end());
-        fine_gains.erase(std::unique(fine_gains.begin(), fine_gains.end()), fine_gains.end());
+          std::sort(fine_gains.begin(), fine_gains.end());
+          fine_gains.erase(std::unique(fine_gains.begin(), fine_gains.end()), fine_gains.end());
 
-        log_info(__func__,
-                 ": fine tuning ",
-                 freq_label,
-                 frequency_unit,
-                 " using ",
-                 fine_gains.size(),
-                 " candidate gain(s) within +/-",
-                 fine_gain_window,
-                 " of coarse lock(s)");
+          log_info(__func__,
+                   ": fine tuning ",
+                   freq_label,
+                   frequency_unit,
+                   " using ",
+                   fine_gains.size(),
+                   " candidate gain(s) within +/-",
+                   fine_gain_window,
+                   " of coarse lock(s)");
+        }
+        else
+        {
+          log_info(__func__,
+                   ": skipping fine gain search at ",
+                   freq_label,
+                   frequency_unit,
+                   " because BER reached 0");
+        }
 
         gain_scan_result best = locked;
         float best_score = quality_score(best);
@@ -4666,6 +4727,20 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
             continue;
 
           float score = quality_score(fine);
+
+          if (has_zero_ber(fine))
+          {
+            best = fine;
+            best_score = score;
+            log_info(__func__,
+                     ": accepting HD fine gain=",
+                     fine.gain,
+                     " at ",
+                     freq_label,
+                     frequency_unit,
+                     " after BER reached 0");
+            break;
+          }
 
           if (!best.sync || gain_is_better(fine, best, score, best_score))
           {
