@@ -36,6 +36,8 @@ jobs:
         path: ${{ env.app_id }}
     - name: Test HD demux responsiveness
       run: python3 "${{ github.workspace }}/${{ env.app_id }}/tools/test-hd-demux.py"
+    - name: Test HD audio buffering
+      run: python3 "${{ github.workspace }}/${{ env.app_id }}/tools/test-hd-audio-buffer.py"
     - name: Register add-on definition
       if: matrix.DEBIAN_BUILD != true
       run: |

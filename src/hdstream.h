@@ -25,6 +25,7 @@
 #pragma once
 
 #include "dsp_hd/nrsc5.h"
+#include "hd_audio_buffer.h"
 #include "props.h"
 #include "pvrstream.h"
 #include "rtldevice.h"
@@ -251,6 +252,7 @@ private:
   // STREAM CONTROL
   //
   demux_queue_t m_queue; // queue<> of demux objects
+  hd_audio_buffer m_audio_buffer; // selected-program PCM reserve
   mutable std::mutex m_queuelock; // Synchronization object
   std::condition_variable m_cv; // Transfer event condvar
   std::thread m_worker; // Data transfer thread

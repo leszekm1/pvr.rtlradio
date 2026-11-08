@@ -711,7 +711,12 @@ DEMUX_PACKET* hdstream::demuxread(std::function<DEMUX_PACKET*(int)> const& alloc
   // when the buffer runs low. An empty packet means "try again", not EOF.
   std::unique_lock<std::mutex> lock(m_queuelock);
   if (!m_cv.wait_for(lock, std::chrono::milliseconds(50),
-                     [&]() -> bool { return ((m_queue.size() > 0) || m_stopped.load() == true); }))
+                     [&]() -> bool {
+                       return m_stopped.load() ||
+                              (!m_queue.empty() &&
+                               (m_queue.front()->streamid == DEMUX_SPECIALID_STREAMCHANGE ||
+                                m_audio_buffer.ready()));
+                     }))
     return allocator(0);
 
   // If the worker thread was stopped, check for and re-throw any exception that occurred,
@@ -728,6 +733,8 @@ DEMUX_PACKET* hdstream::demuxread(std::function<DEMUX_PACKET*(int)> const& alloc
   // Pop off the topmost object from the queue<> and release the lock
   std::unique_ptr<demux_packet_t> packet(std::move(m_queue.front()));
   m_queue.pop();
+  if (packet && packet->streamid == STREAM_ID_AUDIO)
+    m_audio_buffer.consumed(packet->size / (2 * sizeof(int16_t)));
   lock.unlock();
 
   // The packet queue should never have a null packet in it
@@ -917,6 +924,7 @@ void hdstream::nrsc5_callback(nrsc5_event_t const* event)
       packet->data = std::move(audiodata);
 
       m_dts += packet->duration;
+      m_audio_buffer.queued(event->audio.count / 2);
 
       m_queue.emplace(std::move(packet));
       queued = true;
@@ -1424,6 +1432,7 @@ void hdstream::nrsc5_callback(nrsc5_event_t const* event)
     {
 
       m_queue = demux_queue_t(); // Replace the queue<>
+      m_audio_buffer.clear();
 
       // Push a DEMUX_SPECIALID_STREAMCHANGE packet into the new queue
       std::unique_ptr<demux_packet_t> packet = std::make_unique<demux_packet_t>();
