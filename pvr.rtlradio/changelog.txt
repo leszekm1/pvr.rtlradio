@@ -1,3 +1,7 @@
+v21.1.0.15
+- Fix long-running HD Radio playback starvation by returning control to Kodi between decoder audio bursts.
+- Add regression coverage for demux responsiveness, packet delivery, shutdown and worker errors.
+
 v21.1.0.4
 - Restore FM HD Radio audio decoding with the required HDC-patched FAAD2 library.
 - Fix LibreELEC release prerequisites and build the HDC decoder in desktop CI.

@@ -705,11 +705,12 @@ void hdstream::demuxflush(void)
 
 DEMUX_PACKET* hdstream::demuxread(std::function<DEMUX_PACKET*(int)> const& allocator)
 {
-  // Wait up to 1500ms for there to be a packet available for processing, don't use
-  // an unconditional wait here; unlike analog radio there may not be data until
-  // the digitial signal has been synchronized
+  // HD audio arrives in bursts about 1.5 seconds apart. Return control to Kodi
+  // between bursts so its playback loop can adjust the live clock and refill
+  // its audio buffer. Waiting for an entire burst starves that control loop
+  // when the buffer runs low. An empty packet means "try again", not EOF.
   std::unique_lock<std::mutex> lock(m_queuelock);
-  if (!m_cv.wait_for(lock, std::chrono::milliseconds(1500),
+  if (!m_cv.wait_for(lock, std::chrono::milliseconds(50),
                      [&]() -> bool { return ((m_queue.size() > 0) || m_stopped.load() == true); }))
     return allocator(0);
 
