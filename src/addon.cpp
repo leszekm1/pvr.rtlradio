@@ -4328,10 +4328,14 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
 
       std::vector<int> valid_gains;
 
-      {
-        std::unique_ptr<rtldevice> gain_device = create_device(settings);
-        gain_device->get_valid_gains(valid_gains);
-      }
+      // Keep the tuner open across the scan. Reopening and reinitializing
+      // the USB hardware for every gain probe can leave its sample stream stuck.
+      std::unique_ptr<rtldevice> device = create_device(settings);
+      device->get_valid_gains(valid_gains);
+      device->set_direct_sampling(hd_am_scan ? 2 : 0);
+      device->set_frequency_correction(0);
+      device->set_sample_rate(sample_rate);
+      device->set_automatic_gain_control(false);
 
       if (valid_gains.empty())
       {
@@ -4431,17 +4435,12 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
                   muxdata = data;
                 });
 
-        std::unique_ptr<rtldevice> device = create_device(settings);
-
-        device->set_direct_sampling(hd_am_scan ? 2 : 0);
-        device->set_frequency_correction(0);
-        device->set_sample_rate(sample_rate);
         device->set_center_frequency(frequency);
-        device->set_automatic_gain_control(false);
         device->set_gain(gain);
         device->begin_stream();
 
         std::atomic<uint64_t> sample_bytes{0};
+        std::atomic<bool> reader_finished{false};
         std::exception_ptr reader_exception = nullptr;
 
         std::thread reader_thread([&]() -> void
@@ -4460,6 +4459,7 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
           {
             reader_exception = std::current_exception();
           }
+          reader_finished.store(true);
         });
 
         auto const started = std::chrono::steady_clock::now();
@@ -4468,6 +4468,9 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
 
         size_t last_subchannel_count = 0;
         auto last_subchannel_change = started;
+        auto last_sample_time = started;
+        uint64_t last_sample_bytes = 0;
+        bool input_failed = false;
 
         while (std::chrono::steady_clock::now() < deadline)
         {
@@ -4525,6 +4528,21 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
             next_ui_update = now + std::chrono::milliseconds(250);
           }
 
+          // Even an empty radio frequency produces continuous IQ samples.
+          // Missing input is a tuner failure, not evidence of no HD station.
+          auto const bytes = sample_bytes.load();
+          if (bytes != last_sample_bytes)
+          {
+            last_sample_bytes = bytes;
+            last_sample_time = now;
+          }
+          if (reader_finished.load() ||
+              now - last_sample_time >= std::chrono::seconds(3))
+          {
+            input_failed = true;
+            break;
+          }
+
           if (current_sync &&
               stop_after_sync_only &&
               (now - started) >= minimum_time)
@@ -4549,35 +4567,33 @@ PVR_ERROR addon::OpenDialogChannelScan(void)
         if (reader_thread.joinable())
           reader_thread.join();
 
-        if (reader_exception)
+        if (!canceled && (reader_exception || input_failed))
         {
-          try
+          std::string reason = "Tuner stopped delivering samples";
+          if (reader_exception)
           {
-            std::rethrow_exception(reader_exception);
+            try
+            {
+              std::rethrow_exception(reader_exception);
+            }
+            catch (std::exception const& ex)
+            {
+              reason = ex.what();
+            }
+            catch (...)
+            {
+              reason = "Tuner sample reader failed";
+            }
           }
-          catch (std::exception& ex)
-          {
-            log_info(__func__,
-                     ": async reader stopped at ",
-                     freq_label,
-                     frequency_unit,
-                     " gain=",
-                     gain,
-                     ": ",
-                     ex.what());
-          }
-          catch (...)
-          {
-            log_info(__func__,
-                     ": async reader stopped at ",
-                     freq_label,
-                     frequency_unit,
-                     " gain=",
-                     gain);
-          }
-        }
 
-        device.reset();
+          // Earlier discoveries are already committed to the database.
+          TriggerChannelUpdate();
+          TriggerChannelGroupsUpdate();
+          throw string_exception(
+              reason, " at ", freq_label, frequency_unit, ". ",
+              muxes_found, " station(s) already found are kept. ",
+              "Reconnect the tuner and try the scan again.");
+        }
 
         {
           std::lock_guard<std::mutex> guard(muxlock);

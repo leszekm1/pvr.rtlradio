@@ -1,3 +1,7 @@
+v21.1.0.17
+- Keep the HD scan tuner open across frequency and gain probes.
+- Stop and preserve partial results when tuner samples cease instead of silently reporting missing stations.
+
 v21.1.0.16
 - Keep an HD audio reserve at startup and after signal gaps so normal decoder bursts do not trigger audible live-clock slowdowns.
 - Preserve sample-derived timestamps and the responsive demux wait.
